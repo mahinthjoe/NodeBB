@@ -1,27 +1,28 @@
 'use strict';
 
-var async = require('async'),
-	db = require('../database'),
-	meta = require('../meta');
+var async = require('async');
+var db = require('../database');
+var meta = require('../meta');
+var privileges = require('../privileges');
 
-module.exports = function(User) {
+module.exports = function (User) {
 
-	User.isReadyToPost = function(uid, callback) {
+	User.isReadyToPost = function (uid, cid, callback) {
 		if (parseInt(uid, 10) === 0) {
 			return callback();
 		}
 
 		async.parallel({
-			userData: function(next) {
+			userData: function (next) {
 				User.getUserFields(uid, ['banned', 'lastposttime', 'joindate', 'email', 'email:confirmed', 'reputation'], next);
 			},
-			exists: function(next) {
+			exists: function (next) {
 				db.exists('user:' + uid, next);
 			},
-			isAdmin: function(next) {
-				User.isAdministrator(uid, next);
+			isAdminOrMod: function (next) {
+				privileges.categories.isAdminOrMod(cid, uid, next);
 			}
-		}, function(err, results) {
+		}, function (err, results) {
 			if (err) {
 				return callback(err);
 			}
@@ -30,7 +31,7 @@ module.exports = function(User) {
 				return callback(new Error('[[error:no-user]]'));
 			}
 
-			if (results.isAdmin) {
+			if (results.isAdminOrMod) {
 				return callback();
 			}
 
@@ -43,6 +44,7 @@ module.exports = function(User) {
 			if (parseInt(meta.config.requireEmailConfirmation, 10) === 1 && parseInt(userData['email:confirmed'], 10) !== 1) {
 				return callback(new Error('[[error:email-not-confirmed]]'));
 			}
+
 			var now = Date.now();
 			if (now - parseInt(userData.joindate, 10) < parseInt(meta.config.initialPostDelay, 10) * 1000) {
 				return callback(new Error('[[error:user-too-new, ' + meta.config.initialPostDelay + ']]'));
@@ -60,36 +62,42 @@ module.exports = function(User) {
 		});
 	};
 
-	User.onNewPostMade = function(postData, callback) {
-		async.parallel([
-			function(next) {
+	User.onNewPostMade = function (postData, callback) {
+		async.series([
+			function (next) {
 				User.addPostIdToUser(postData.uid, postData.pid, postData.timestamp, next);
 			},
-			function(next) {
+			function (next) {
 				User.incrementUserPostCountBy(postData.uid, 1, next);
 			},
-			function(next) {
+			function (next) {
 				User.setUserField(postData.uid, 'lastposttime', postData.timestamp, next);
+			},
+			function (next) {
+				User.updateLastOnlineTime(postData.uid, next);
 			}
 		], callback);
 	};
 
-	User.addPostIdToUser = function(uid, pid, timestamp, callback) {
+	User.addPostIdToUser = function (uid, pid, timestamp, callback) {
 		db.sortedSetAdd('uid:' + uid + ':posts', timestamp, pid, callback);
 	};
 
-	User.incrementUserPostCountBy = function(uid, value, callback) {
-		callback = callback || function() {};
-		User.incrementUserFieldBy(uid, 'postcount', value, function(err, newpostcount) {
+	User.incrementUserPostCountBy = function (uid, value, callback) {
+		callback = callback || function () {};
+		User.incrementUserFieldBy(uid, 'postcount', value, function (err, newpostcount) {
 			if (err) {
 				return callback(err);
+			}
+			if (!parseInt(uid, 10)) {
+				return callback();
 			}
 			db.sortedSetAdd('users:postcount', newpostcount, uid, callback);
 		});
 	};
 
-	User.getPostIds = function(uid, start, stop, callback) {
-		db.getSortedSetRevRange('uid:' + uid + ':posts', start, stop, function(err, pids) {
+	User.getPostIds = function (uid, start, stop, callback) {
+		db.getSortedSetRevRange('uid:' + uid + ':posts', start, stop, function (err, pids) {
 			callback(err, Array.isArray(pids) ? pids : []);
 		});
 	};

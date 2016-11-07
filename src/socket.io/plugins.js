@@ -7,9 +7,9 @@ var	SocketPlugins = {};
 
 	How? From your plugin:
 
-		var SocketPlugins = require.main.require('./src/socket.io/modules');
+		var SocketPlugins = require.main.require('./src/socket.io/plugins');
 		SocketPlugins.myPlugin = {};
-		SocketPlugins.myPlugin.myMethod = function() { ... };
+		SocketPlugins.myPlugin.myMethod = function(socket, data, callback) { ... };
 
 	Be a good lad and namespace your methods.
 */

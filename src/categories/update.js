@@ -1,52 +1,136 @@
 
 'use strict';
 
-var async = require('async'),
-	db = require('../database'),
-	utils = require('../../public/src/utils');
+var async = require('async');
+var db = require('../database');
+var utils = require('../../public/src/utils');
+var translator = require('../../public/src/modules/translator');
+var plugins = require('../plugins');
 
+module.exports = function (Categories) {
 
-module.exports = function(Categories) {
-
-	Categories.update = function(modified, callback) {
-
-		function updateCategory(cid, next) {
-			Categories.exists(cid, function(err, exists) {
-				if (err || !exists) {
-					return next(err);
-				}
-
-				var category = modified[cid];
-				var fields = Object.keys(category);
-
-				async.each(fields, function(key, next) {
-					updateCategoryField(cid, key, category[key], next);
-				}, next);
-			});
-		}
+	Categories.update = function (modified, callback) {
 
 		var cids = Object.keys(modified);
 
-		async.each(cids, updateCategory, function(err) {
+		async.each(cids, function (cid, next) {
+			updateCategory(cid, modified[cid], next);
+		}, function (err) {
 			callback(err, cids);
 		});
 	};
 
+	function updateCategory(cid, modifiedFields, callback) {
+		Categories.exists(cid, function (err, exists) {
+			if (err || !exists) {
+				return callback(err);
+			}
+
+
+			if (modifiedFields.hasOwnProperty('name')) {
+				translator.translate(modifiedFields.name, function (translated) {
+					modifiedFields.slug = cid + '/' + utils.slugify(translated);
+				});
+			}
+
+			plugins.fireHook('filter:category.update', {category: modifiedFields}, function (err, categoryData) {
+				if (err) {
+					return callback(err);
+				}
+
+				var category = categoryData.category;
+				var fields = Object.keys(category);
+				// move parent to front, so its updated first
+				var parentCidIndex = fields.indexOf('parentCid');
+				if (parentCidIndex !== -1 && fields.length > 1) {
+					fields.splice(0, 0, fields.splice(parentCidIndex, 1)[0]);
+				}
+
+				async.eachSeries(fields, function (key, next) {
+					updateCategoryField(cid, key, category[key], next);
+				}, function (err) {
+					if (err) {
+						return callback(err);
+					}
+					plugins.fireHook('action:category.update', {cid: cid, modified: category});
+					callback();
+				});
+			});
+		});
+	}
+
 	function updateCategoryField(cid, key, value, callback) {
-		db.setObjectField('category:' + cid, key, value, function(err) {
+		if (key === 'parentCid') {
+			return updateParent(cid, value, callback);
+		}
+
+		db.setObjectField('category:' + cid, key, value, function (err) {
 			if (err) {
 				return callback(err);
 			}
 
-			if (key === 'name') {
-				var slug = cid + '/' + utils.slugify(value);
-				db.setObjectField('category:' + cid, 'slug', slug, callback);
-			} else if (key === 'order') {
-				db.sortedSetAdd('categories:cid', value, cid, callback);
+			if (key === 'order') {
+				updateOrder(cid, value, callback);
+			} else if (key === 'description') {
+				Categories.parseDescription(cid, value, callback);
 			} else {
 				callback();
 			}
 		});
 	}
+
+	function updateParent(cid, newParent, callback) {
+		if (parseInt(cid, 10) === parseInt(newParent, 10)) {
+			return callback(new Error('[[error:cant-set-self-as-parent]]'));
+		}
+		Categories.getCategoryField(cid, 'parentCid', function (err, oldParent) {
+			if (err) {
+				return callback(err);
+			}
+
+			async.series([
+				function (next) {
+					oldParent = parseInt(oldParent, 10) || 0;
+					db.sortedSetRemove('cid:' + oldParent + ':children', cid, next);
+				},
+				function (next) {
+					newParent = parseInt(newParent, 10) || 0;
+					db.sortedSetAdd('cid:' + newParent + ':children', cid, cid, next);
+				},
+				function (next) {
+					db.setObjectField('category:' + cid, 'parentCid', newParent, next);
+				}
+			], function (err) {
+				callback(err);
+			});
+		});
+	}
+
+	function updateOrder(cid, order, callback) {
+		Categories.getCategoryField(cid, 'parentCid', function (err, parentCid) {
+			if (err) {
+				return callback(err);
+			}
+
+			async.parallel([
+				function (next) {
+					db.sortedSetAdd('categories:cid', order, cid, next);
+				},
+				function (next) {
+					parentCid = parseInt(parentCid, 10) || 0;
+					db.sortedSetAdd('cid:' + parentCid + ':children', order, cid, next);
+				}
+			], callback);
+		});
+	}
+
+	Categories.parseDescription = function (cid, description, callback) {
+		plugins.fireHook('filter:parse.raw', description, function (err, parsedDescription) {
+			if (err) {
+				return callback(err);
+			}
+			Categories.setCategoryField(cid, 'descriptionParsed', parsedDescription, callback);
+		});
+	};
 
 };

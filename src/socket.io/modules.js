@@ -1,268 +1,360 @@
 "use strict";
 
-var	nconf = require('nconf'),
-	async = require('async'),
-	S = require('string'),
-	winston = require('winston'),
-	_ = require('underscore'),
+var async = require('async');
+var validator = require('validator');
 
-	posts = require('../posts'),
-	postTools = require('../postTools'),
-	topics = require('../topics'),
-	meta = require('../meta'),
-	Messaging = require('../messaging'),
-	user = require('../user'),
-	plugins = require('../plugins'),
-	utils = require('../../public/src/utils'),
-	privileges = require('../privileges'),
+var meta = require('../meta');
+var notifications = require('../notifications');
+var plugins = require('../plugins');
+var Messaging = require('../messaging');
+var utils = require('../../public/src/utils');
+var server = require('./');
+var user = require('../user');
 
-	server = require('./'),
-
-
-	SocketModules = {
-		composer: {},
-		chats: {},
-		sounds: {},
-		settings: {}
-	};
-
-/* Posts Composer */
-
-SocketModules.composer.push = function(socket, pid, callback) {
-	privileges.posts.can('read', pid, socket.uid, function(err, canRead) {
-		if (err || !canRead) {
-			return callback(err || new Error('[[error:no-privileges]]'));
-		}
-		posts.getPostFields(pid, ['content', 'tid', 'uid', 'handle'], function(err, postData) {
-			if(err || (!postData && !postData.content)) {
-				return callback(err || new Error('[[error:invalid-pid]]'));
-			}
-
-			async.parallel({
-				topic: function(next) {
-					topics.getTopicDataByPid(pid, next);
-				},
-				tags: function(next) {
-					topics.getTopicTags(postData.tid, next);
-				},
-				isMain: function(next) {
-					posts.isMain(pid, next);
-				}
-			}, function(err, results) {
-				if(err) {
-					return callback(err);
-				}
-
-				if (!results.topic) {
-					return callback(new Error('[[error:no-topic]]'));
-				}
-
-				callback(null, {
-					pid: pid,
-					uid: postData.uid,
-					handle: parseInt(meta.config.allowGuestHandles, 10) ? postData.handle : undefined,
-					body: postData.content,
-					title: results.topic.title,
-					topic_thumb: results.topic.thumb,
-					tags: results.tags,
-					isMain: results.isMain
-				});
-			});
-		});
-	});
-};
-
-SocketModules.composer.editCheck = function(socket, pid, callback) {
-	posts.isMain(pid, function(err, isMain) {
-		callback(err, {
-			titleEditable: isMain
-		});
-	});
-};
-
-SocketModules.composer.renderPreview = function(socket, content, callback) {
-	plugins.fireHook('filter:parse.raw', content, callback);
-};
-
-SocketModules.composer.renderHelp = function(socket, data, callback) {
-	var helpText = meta.config['composer:customHelpText'] || '';
-
-	if (meta.config['composer:showHelpTab'] === '0') {
-		return callback(new Error('help-hidden'));
-	}
-
-	plugins.fireHook('filter:parse.raw', helpText, function(err, helpText) {
-		if (!meta.config['composer:allowPluginHelp'] || meta.config['composer:allowPluginHelp'] === '1') {
-			plugins.fireHook('filter:composer.help', helpText, callback);
-		} else {
-			callback(null, helpText);
-		}
-	});
-};
-
-SocketModules.composer.notifyTyping = function(socket, data) {
-	if (!socket.uid || !parseInt(data.tid, 10)) {
-		return;
-	}
-	server.in('topic_' + data.tid).emit('event:topic.notifyTyping', data);
-};
-
-SocketModules.composer.stopNotifyTyping = function(socket, data) {
-	if (!socket.uid || !parseInt(data.tid, 10)) {
-		return;
-	}
-	server.in('topic_' + data.tid).emit('event:topic.stopNotifyTyping', data);
-};
-
-SocketModules.composer.getFormattingOptions = function(socket, data, callback) {
-	plugins.fireHook('filter:composer.formatting', {
-		options: [
-			{ name: 'tags', className: 'fa fa-tags', mobile: true }
-		]
-	}, function(err, payload) {
-		callback(err, payload.options);
-	});
+var SocketModules = {
+	chats: {},
+	sounds: {},
+	settings: {}
 };
 
 /* Chat */
 
-SocketModules.chats.get = function(socket, data, callback) {
-	if(!data) {
+SocketModules.chats.getRaw = function (socket, data, callback) {
+	if (!data || !data.hasOwnProperty('mid')) {
 		return callback(new Error('[[error:invalid-data]]'));
 	}
-
-	Messaging.getMessages(socket.uid, data.touid, data.since, false, callback);
+	async.waterfall([
+		function (next) {
+			Messaging.isUserInRoom(socket.uid, data.roomId, next);
+		},
+		function (inRoom, next) {
+			if (!inRoom) {
+				return next(new Error('[[error:not-allowed]]'));
+			}
+			Messaging.getMessageField(data.mid, 'content', next);
+		}
+	], callback);
 };
 
-SocketModules.chats.send = function(socket, data, callback) {
+SocketModules.chats.newRoom = function (socket, data, callback) {
 	if (!data) {
 		return callback(new Error('[[error:invalid-data]]'));
 	}
 
-	if (parseInt(meta.config.disableChat) === 1) {
-		return callback(new Error('[[error:chat-disabled]]'));
-	}
-
-	var touid = parseInt(data.touid, 10);
-	if (touid === socket.uid || socket.uid === 0) {
-		return;
-	}
-
-	var msg = S(data.message).stripTags().s;
-
-	var now = Date.now();
-	socket.lastChatMessageTime = socket.lastChatMessageTime || 0;
-
-	if (now - socket.lastChatMessageTime < 200) {
+	if (rateLimitExceeded(socket)) {
 		return callback(new Error('[[error:too-many-messages]]'));
 	}
 
-	socket.lastChatMessageTime = now;
-
-	user.getUserFields(socket.uid, ['banned', 'email:confirmed'], function(err, userData) {
+	Messaging.canMessageUser(socket.uid, data.touid, function (err) {
 		if (err) {
 			return callback(err);
 		}
 
-		if (parseInt(userData.banned, 10) === 1) {
-			return callback(new Error('[[error:user-banned]]'));
-		}
-
-		if (parseInt(meta.config.requireEmailConfirmation, 10) === 1 && parseInt(userData['email:confirmed'], 10) !== 1) {
-			return callback(new Error('[[error:email-not-confirmed-chat]]'));
-		}
-
-		Messaging.canMessage(socket.uid, touid, function(err, allowed) {
-			if (err || !allowed) {
-				return callback(err || new Error('[[error:chat-restricted]]'));
-			}
-
-			Messaging.addMessage(socket.uid, touid, msg, function(err, message) {
-				if (err) {
-					return callback(err);
-				}
-
-				Messaging.notifyUser(socket.uid, touid, message);
-
-				// Recipient
-				SocketModules.chats.pushUnreadCount(touid);
-				server.in('uid_' + touid).emit('event:chats.receive', {
-					withUid: socket.uid,
-					message: message,
-					self: 0
-				});
-
-				// Sender
-				SocketModules.chats.pushUnreadCount(socket.uid);
-				server.in('uid_' + socket.uid).emit('event:chats.receive', {
-					withUid: touid,
-					message: message,
-					self: 1
-				});
-
-				callback();
-			});
-		});
+		Messaging.newRoom(socket.uid, [data.touid], callback);
 	});
 };
 
-SocketModules.chats.canMessage = function(socket, toUid, callback) {
-	Messaging.canMessage(socket.uid, toUid, function(err, allowed) {
-		callback(!allowed ? new Error('[[error:chat-restricted]]') : undefined);
-	});
-};
-
-SocketModules.chats.pushUnreadCount = function(uid) {
-	Messaging.getUnreadCount(uid, function(err, unreadCount) {
-		if (err) {
-			return;
-		}
-		server.in('uid_' + uid).emit('event:unread.updateChatCount', null, unreadCount);
-	});
-};
-
-SocketModules.chats.markRead = function(socket, touid, callback) {
-	Messaging.markRead(socket.uid, touid, function(err) {
-		if (!err) {
-			SocketModules.chats.pushUnreadCount(socket.uid);
-		}
-	});
-};
-
-SocketModules.chats.userStartTyping = function(socket, data, callback) {
-	sendTypingNotification('event:chats.userStartTyping', socket, data, callback);
-};
-
-SocketModules.chats.userStopTyping = function(socket, data, callback) {
-	sendTypingNotification('event:chats.userStopTyping', socket, data, callback);
-};
-
-function sendTypingNotification(event, socket, data, callback) {
-	if (!socket.uid || !data) {
-		return;
-	}
-	server.in('uid_' + data.touid).emit(event, data.fromUid);
-}
-
-SocketModules.chats.getRecentChats = function(socket, data, callback) {
-	if (!data || !utils.isNumber(data.after)) {
+SocketModules.chats.send = function (socket, data, callback) {
+	if (!data || !data.roomId || !socket.uid) {
 		return callback(new Error('[[error:invalid-data]]'));
 	}
-	var start = parseInt(data.after, 10),
-		end = start + 9;
 
-	Messaging.getRecentChats(socket.uid, start, end, callback);
+	if (rateLimitExceeded(socket)) {
+		return callback(new Error('[[error:too-many-messages]]'));
+	}
+
+	async.waterfall([
+		function (next) {
+			plugins.fireHook('filter:messaging.send', {
+				data: data,
+				uid: socket.uid
+			}, function (err, results) {
+				data = results.data;
+				next(err);
+			});
+		},
+		function (next) {
+			Messaging.canMessageRoom(socket.uid, data.roomId, next);
+		},
+		function (next) {
+			Messaging.sendMessage(socket.uid, data.roomId, data.message, Date.now(), next);
+		},
+		function (message, next) {
+			Messaging.notifyUsersInRoom(socket.uid, data.roomId, message);
+			user.updateOnlineUsers(socket.uid);
+			next();
+		}
+	], callback);
+};
+
+function rateLimitExceeded(socket) {
+	var now = Date.now();
+	socket.lastChatMessageTime = socket.lastChatMessageTime || 0;
+	var delay = meta.config.hasOwnProperty('chatMessageDelay') ? parseInt(meta.config.chatMessageDelay, 10) : 200;
+	if (now - socket.lastChatMessageTime < delay) {
+		return true;
+	} else {
+		socket.lastChatMessageTime = now;
+	}
+	return false;
+}
+
+SocketModules.chats.loadRoom = function (socket, data, callback) {
+	if (!data || !data.roomId) {
+		return callback(new Error('[[error:invalid-data]]'));
+	}
+
+	async.waterfall([
+		function (next) {
+			Messaging.isUserInRoom(socket.uid, data.roomId, next);
+		},
+		function (inRoom, next) {
+			if (!inRoom) {
+				return next(new Error('[[error:not-allowed]]'));
+			}
+
+			async.parallel({
+				roomData: async.apply(Messaging.getRoomData, data.roomId),
+				users: async.apply(Messaging.getUsersInRoom, data.roomId, 0, -1),
+				messages: async.apply(Messaging.getMessages, {
+					callerUid: socket.uid,
+					uid: data.uid || socket.uid,
+					roomId: data.roomId,
+					isNew: false
+				}),
+			}, next);
+		},
+		function (results, next) {
+			results.roomData.users = results.users;
+			results.roomData.usernames = Messaging.generateUsernames(results.users, socket.uid);
+			results.roomData.messages = results.messages;
+			results.roomData.groupChat = results.roomData.hasOwnProperty('groupChat') ? results.roomData.groupChat : results.users.length > 2;
+			results.roomData.isOwner = parseInt(results.roomData.owner, 10) === socket.uid;
+			results.roomData.maximumUsersInChatRoom = parseInt(meta.config.maximumUsersInChatRoom, 10) || 0;
+			results.roomData.showUserInput = !results.roomData.maximumUsersInChatRoom || results.roomData.maximumUsersInChatRoom > 2;
+			next(null, results.roomData);
+		}
+	], callback);
+};
+
+SocketModules.chats.addUserToRoom = function (socket, data, callback) {
+	if (!data || !data.roomId || !data.username) {
+		return callback(new Error('[[error:invalid-data]]'));
+	}
+	var uid;
+	async.waterfall([
+		function (next) {
+			Messaging.getUserCountInRoom(data.roomId, next);
+		},
+		function (userCount, next) {
+			var maxUsers = parseInt(meta.config.maximumUsersInChatRoom, 10) || 0;
+			if (maxUsers && userCount >= maxUsers) {
+				return next(new Error('[[error:cant-add-more-users-to-chat-room]]'));
+			}
+			next();
+		},
+		function (next) {
+			user.getUidByUsername(data.username, next);
+		},
+		function (_uid, next) {
+			uid = _uid;
+			if (!uid) {
+				return next(new Error('[[error:no-user]]'));
+			}
+			if (socket.uid === parseInt(uid, 10)) {
+				return next(new Error('[[error:cant-add-self-to-chat-room]]'));
+			}
+			async.parallel({
+				settings: async.apply(user.getSettings, uid),
+				isAdminOrGlobalMod: async.apply(user.isAdminOrGlobalMod, socket.uid),
+				isFollowing: async.apply(user.isFollowing, uid, socket.uid)
+			}, next);
+		},
+		function (results, next) {
+			if (results.settings.restrictChat && !results.isAdminOrGlobalMod && !results.isFollowing) {
+				return next(new Error('[[error:chat-restricted]]'));
+			}
+
+			Messaging.addUsersToRoom(socket.uid, [uid], data.roomId, next);
+		}
+	], callback);
+};
+
+SocketModules.chats.removeUserFromRoom = function (socket, data, callback) {
+	if (!data || !data.roomId) {
+		return callback(new Error('[[error:invalid-data]]'));
+	}
+	async.waterfall([
+		function (next) {
+			user.getUidByUsername(data.username, next);
+		},
+		function (uid, next) {
+			if (!uid) {
+				return next(new Error('[[error:no-user]]'));
+			}
+
+			Messaging.removeUsersFromRoom(socket.uid, [uid], data.roomId, next);
+		}
+	], callback);
+};
+
+SocketModules.chats.leave = function (socket, roomid, callback) {
+	if (!socket.uid || !roomid) {
+		return callback(new Error('[[error:invalid-data]]'));
+	}
+
+	Messaging.leaveRoom([socket.uid], roomid, callback);
 };
 
 
+SocketModules.chats.edit = function (socket, data, callback) {
+	if (!data || !data.roomId) {
+		return callback(new Error('[[error:invalid-data]]'));
+	}
+
+	Messaging.canEdit(data.mid, socket.uid, function (err, allowed) {
+		if (err || !allowed) {
+			return callback(err || new Error('[[error:cant-edit-chat-message]]'));
+		}
+
+		Messaging.editMessage(socket.uid, data.mid, data.roomId, data.message, callback);
+	});
+};
+
+SocketModules.chats.delete = function (socket, data, callback) {
+	if (!data || !data.roomId || !data.messageId) {
+		return callback(new Error('[[error:invalid-data]]'));
+	}
+
+	Messaging.canEdit(data.messageId, socket.uid, function (err, allowed) {
+		if (err || !allowed) {
+			return callback(err || new Error('[[error:cant-delete-chat-message]]'));
+		}
+
+		Messaging.deleteMessage(data.messageId, data.roomId, callback);
+	});
+};
+
+SocketModules.chats.canMessage = function (socket, roomId, callback) {
+	Messaging.canMessageRoom(socket.uid, roomId, callback);
+};
+
+SocketModules.chats.markRead = function (socket, roomId, callback) {
+	if (!socket.uid) {
+		return callback(new Error('[[error:invalid-data]]'));
+	}
+	async.parallel({
+		usersInRoom: async.apply(Messaging.getUidsInRoom, roomId, 0, -1),
+		markRead: async.apply(Messaging.markRead, socket.uid, roomId)
+	}, function (err, results) {
+		if (err) {
+			return callback(err);
+		}
+
+		Messaging.pushUnreadCount(socket.uid);
+
+		// Mark notification read
+		var nids = results.usersInRoom.filter(function (uid) {
+			return parseInt(uid, 10) !== socket.uid;
+		}).map(function (uid) {
+			return 'chat_' + uid + '_' + roomId;
+		});
+
+		notifications.markReadMultiple(nids, socket.uid, function () {
+			user.notifications.pushCount(socket.uid);
+		});
+
+		server.in('uid_' + socket.uid).emit('event:chats.markedAsRead', {roomId: roomId});
+		callback();
+	});
+};
+
+SocketModules.chats.markAllRead = function (socket, data, callback) {
+	async.waterfall([
+		function (next) {
+			Messaging.markAllRead(socket.uid, next);
+		},
+		function (next) {
+			Messaging.pushUnreadCount(socket.uid);
+			next();
+		}
+	], callback);
+};
+
+SocketModules.chats.renameRoom = function (socket, data, callback) {
+	if (!data) {
+		return callback(new Error('[[error:invalid-name]]'));
+	}
+
+	async.waterfall([
+		function (next) {
+			Messaging.renameRoom(socket.uid, data.roomId, data.newName, next);
+		},
+		function (next) {
+			Messaging.getUidsInRoom(data.roomId, 0, -1, next);
+		},
+		function (uids, next) {
+			var eventData = {roomId: data.roomId, newName: validator.escape(String(data.newName))};
+			uids.forEach(function (uid) {
+				server.in('uid_' + uid).emit('event:chats.roomRename', eventData);
+			});
+			next();
+		}
+	], callback);
+};
+
+SocketModules.chats.getRecentChats = function (socket, data, callback) {
+	if (!data || !utils.isNumber(data.after) || !utils.isNumber(data.uid)) {
+		return callback(new Error('[[error:invalid-data]]'));
+	}
+	var start = parseInt(data.after, 10);
+	var stop = start + 9;
+	Messaging.getRecentChats(socket.uid, data.uid, start, stop, callback);
+};
+
+SocketModules.chats.hasPrivateChat = function (socket, uid, callback) {
+	if (!socket.uid || !uid) {
+		return callback(null, new Error('[[error:invalid-data]]'));
+	}
+	Messaging.hasPrivateChat(socket.uid, uid, callback);
+};
+
+SocketModules.chats.getMessages = function (socket, data, callback) {
+	if (!socket.uid || !data.uid || !data.roomId) {
+		return callback(new Error('[[error:invalid-data]]'));
+	}
+
+	var params = {
+		callerUid: socket.uid,
+		uid: data.uid,
+		roomId: data.roomId,
+		start: parseInt(data.start, 10) || 0,
+		count: 50,
+		markRead: false
+	};
+
+	if (data.hasOwnProperty('markRead')) {
+		params.markRead = data.markRead;
+	}
+
+	Messaging.getMessages(params, callback);
+};
+
 /* Sounds */
-SocketModules.sounds.getSounds = function(socket, data, callback) {
+SocketModules.sounds.getSounds = function (socket, data, callback) {
 	// Read sounds from local directory
 	meta.sounds.getFiles(callback);
 };
 
-SocketModules.sounds.getMapping = function(socket, data, callback) {
-	meta.sounds.getMapping(callback);
+SocketModules.sounds.getMapping = function (socket, data, callback) {
+	meta.sounds.getMapping(socket.uid, callback);
+};
+
+SocketModules.sounds.getData = function (socket, data, callback) {
+	async.parallel({
+		mapping: async.apply(meta.sounds.getMapping, socket.uid),
+		files: async.apply(meta.sounds.getFiles)
+	}, callback);
 };
 
 module.exports = SocketModules;

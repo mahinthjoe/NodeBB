@@ -1,35 +1,34 @@
 "use strict";
-/* global define, socket, config */
+/* global app, define, socket, config */
 
-define('sounds', ['buzz'], function(buzz) {
+define('sounds', ['buzz'], function (buzz) {
 	var	Sounds = {};
 
 	var loadedSounds = {};
-	var eventSoundMapping = {};
-	var files = {};
+	var eventSoundMapping;
+	var files;
 
-	loadFiles();
+	socket.on('event:sounds.reloadMapping', function () {
+		Sounds.reloadMapping();
+	});
 
-	loadMapping();
-
-	socket.on('event:sounds.reloadMapping', loadMapping);
-
-	function loadFiles() {
-		socket.emit('modules.sounds.getSounds', function(err, sounds) {
+	Sounds.reloadMapping = function () {
+		socket.emit('modules.sounds.getMapping', function (err, mapping) {
 			if (err) {
-				return console.log('[sounds] Could not initialise!');
-			}
-
-			files = sounds;
-		});
-	}
-
-	function loadMapping() {
-		socket.emit('modules.sounds.getMapping', function(err, mapping) {
-			if (err) {
-				return console.log('[sounds] Could not load sound mapping!');
+				return app.alertError(err.message);
 			}
 			eventSoundMapping = mapping;
+		});
+	};
+
+	function loadData(callback) {
+		socket.emit('modules.sounds.getData', function (err, data) {
+			if (err) {
+				return app.alertError('[sounds] Could not load sound mapping!');
+			}
+			eventSoundMapping = data.mapping;
+			files = data.files;
+			callback();
 		});
 	}
 
@@ -38,25 +37,36 @@ define('sounds', ['buzz'], function(buzz) {
 	}
 
 	function loadFile(fileName, callback) {
+		function createSound() {
+			if (files && files[fileName]) {
+				loadedSounds[fileName] = new buzz.sound(files[fileName]);
+			}
+			callback();
+		}
+
 		if (isSoundLoaded(fileName)) {
 			return callback();
 		}
 
-		if (files && files[fileName]) {
-			loadedSounds[fileName] = new buzz.sound(files[fileName]);
+		if (!files || !files[fileName]) {
+			return loadData(createSound);
 		}
-		callback();
+		createSound();
 	}
 
-	Sounds.play = function(name) {
-		if (!config.notificationSounds) {
-			return;
+	Sounds.play = function (name) {
+		function play() {
+			Sounds.playFile(eventSoundMapping[name]);
 		}
 
-		Sounds.playFile(eventSoundMapping[name]);
+		if (!eventSoundMapping) {
+			return loadData(play);
+		}
+
+		play();
 	};
 
-	Sounds.playFile = function(fileName) {
+	Sounds.playFile = function (fileName) {
 		if (!fileName) {
 			return;
 		}
@@ -65,7 +75,7 @@ define('sounds', ['buzz'], function(buzz) {
 			if (loadedSounds[fileName]) {
 				loadedSounds[fileName].play();
 			} else {
-				console.log('[sounds] Not found:', fileName);
+				app.alertError('[sounds] Not found: ' + fileName);
 			}
 		}
 

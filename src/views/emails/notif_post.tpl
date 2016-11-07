@@ -5,12 +5,9 @@
 
 <a href="{url}">[[email:notif.post.cta]]</a>
 
-<p>
-	[[email:closing]]<br />
-	<strong>{site_title}</strong>
-</p>
+<!-- IMPORT emails/partials/footer.tpl -->
 
 <hr />
 <p>
-	[[email:notif.post.unsub.info]] <a href="{base_url}/user/{username}/settings">[[email:unsub.cta]]</a>.
+	[[email:notif.post.unsub.info]] <a href="{base_url}/user/{userslug}/settings">[[email:unsub.cta]]</a>.
 </p>

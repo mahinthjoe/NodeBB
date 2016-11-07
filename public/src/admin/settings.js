@@ -1,28 +1,37 @@
-"use strict";
-/*global define, app, socket, ajaxify, RELATIVE_PATH */
+'use strict';
+/*global define, app, socket, ajaxify */
 
-define('admin/settings', ['uploader', 'sounds'], function(uploader, sounds) {
+define('admin/settings', ['uploader'], function (uploader) {
 	var Settings = {};
 
-	Settings.init = function() {
+	Settings.init = function () {
+		console.warn('[deprecation] require(\'admin/settings\').init() has been deprecated, please call require(\'admin/settings\').prepare() directly instead.');
 		Settings.prepare();
 	};
 
-	Settings.prepare = function(callback) {
-		// Come back in 125ms if the config isn't ready yet
-		if (!app.config) {
-			setTimeout(function() {
-				Settings.prepare(callback);
-			}, 125);
-			return;
-		}
+	Settings.populateTOC = function () {
+		$('.settings-header').each(function () {
+			var header = $(this).text(),
+				anchor = header.toLowerCase().replace(/ /g, '-').trim();
 
+			$(this).prepend('<a name="' + anchor + '"></a>');
+			$('.section-content ul').append('<li><a href="#' + anchor + '">' + header + '</a></li>');
+		});
+	};
+
+	Settings.prepare = function (callback) {
 		// Populate the fields on the page from the config
 		var fields = $('#content [data-field]'),
 			numFields = fields.length,
 			saveBtn = $('#save'),
 			revertBtn = $('#revert'),
 			x, key, inputType, field;
+
+		// Handle unsaved changes
+		$(fields).on('change', function () {
+			app.flags = app.flags || {};
+			app.flags._unsaved = true;
+		});
 
 		for (x = 0; x < numFields; x++) {
 			field = fields.eq(x);
@@ -40,26 +49,28 @@ define('admin/settings', ['uploader', 'sounds'], function(uploader, sounds) {
 						break;
 
 					case 'checkbox':
-						field.prop('checked', parseInt(app.config[key], 10) === 1);
+						var checked = parseInt(app.config[key], 10) === 1;
+						field.prop('checked', checked);
+						field.parents('.mdl-switch').toggleClass('is-checked', checked);
 						break;
 					}
 				}
 			} else if (field.is('textarea')) {
-				if (app.config[key]) {
+				if (app.config.hasOwnProperty(key)) {
 					field.val(app.config[key]);
 				}
 			} else if (field.is('select')) {
-				if (app.config[key]) {
+				if (app.config.hasOwnProperty(key)) {
 					field.val(app.config[key]);
 				}
 			}
 		}
 
-		revertBtn.off('click').on('click', function(e) {
+		revertBtn.off('click').on('click', function () {
 			ajaxify.refresh();
 		});
 
-		saveBtn.off('click').on('click', function(e) {
+		saveBtn.off('click').on('click', function (e) {
 			e.preventDefault();
 
 			saveFields(fields, function onFieldsSaved(err) {
@@ -72,6 +83,9 @@ define('admin/settings', ['uploader', 'sounds'], function(uploader, sounds) {
 						type: 'danger'
 					});
 				}
+
+				app.flags._unsaved = false;
+
 				app.alert({
 					alert_id: 'config_status',
 					timeout: 2500,
@@ -79,23 +93,15 @@ define('admin/settings', ['uploader', 'sounds'], function(uploader, sounds) {
 					message: 'Your changes to the NodeBB configuration have been saved.',
 					type: 'success'
 				});
+
+				$(window).trigger('action:admin.settingsSaved');
 			});
 		});
 
 		handleUploads();
 
-		$('button[data-action="email.test"]').off('click').on('click', function() {
-			socket.emit('admin.email.test', function(err) {
-				if (err) {
-					return app.alertError(err.message);
-				}
-				app.alertSuccess('Test Email Sent');
-			});
-			return false;
-		});
-
-		$('#clear-sitemap-cache').off('click').on('click', function() {
-			socket.emit('admin.settings.clearSitemapCache', function() {
+		$('#clear-sitemap-cache').off('click').on('click', function () {
+			socket.emit('admin.settings.clearSitemapCache', function () {
 				app.alertSuccess('Sitemap Cache Cleared!');
 			});
 			return false;
@@ -104,29 +110,43 @@ define('admin/settings', ['uploader', 'sounds'], function(uploader, sounds) {
 		if (typeof callback === 'function') {
 			callback();
 		}
+
+		setTimeout(function () {
+			$(window).trigger('action:admin.settingsLoaded');
+		}, 0);
 	};
 
 	function handleUploads() {
-		$('#content input[data-action="upload"]').each(function() {
+		$('#content input[data-action="upload"]').each(function () {
 			var uploadBtn = $(this);
-			uploadBtn.on('click', function() {
-				uploader.open(uploadBtn.attr('data-route'), {}, 0, function(image) {
-					$('#' + uploadBtn.attr('data-target')).val(image);
+			uploadBtn.on('click', function () {
+				uploader.show({
+					title: uploadBtn.attr('data-title'),
+					description: uploadBtn.attr('data-description'),
+					route: uploadBtn.attr('data-route'),
+					params: {},
+					showHelp: uploadBtn.attr('data-help') ? uploadBtn.attr('data-help') === 1 : undefined,
+					accept: uploadBtn.attr('data-accept')
+				}, function (image) {
+					// need to move these into template, ex data-callback
+					if (ajaxify.currentPage === 'admin/general/sounds') {
+						ajaxify.refresh();
+					} else {
+						$('#' + uploadBtn.attr('data-target')).val(image);
+					}
 				});
-
-				uploader.hideAlerts();
 			});
 		});
 	}
 
-	Settings.remove = function(key) {
+	Settings.remove = function (key) {
 		socket.emit('admin.config.remove', key);
 	};
 
 	function saveFields(fields, callback) {
 		var data = {};
 
-		fields.each(function() {
+		fields.each(function () {
 			var field = $(this);
 			var key = field.attr('data-field'),
 				value, inputType;
@@ -153,16 +173,14 @@ define('admin/settings', ['uploader', 'sounds'], function(uploader, sounds) {
 			data[key] = value;
 		});
 
-		socket.emit('admin.config.setMultiple', data, function(err) {
+		socket.emit('admin.config.setMultiple', data, function (err) {
 			if (err) {
 				return callback(err);
 			}
 
-			if (app.config) {
-				for(var field in data) {
-					if (data.hasOwnProperty(field)) {
-						app.config[field] = data[field];
-					}
+			for(var field in data) {
+				if (data.hasOwnProperty(field)) {
+					app.config[field] = data[field];
 				}
 			}
 

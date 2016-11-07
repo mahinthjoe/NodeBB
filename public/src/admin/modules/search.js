@@ -1,11 +1,11 @@
 "use strict";
 /*globals define, admin, ajaxify, RELATIVE_PATH*/
 
-define(function() {
+define(function () {
 	var search = {},
 		searchIndex;
 
-	search.init = function() {
+	search.init = function () {
 		$.getJSON(RELATIVE_PATH + '/templates/indexed.json', function (data) {
 			searchIndex = data;
 			for (var file in searchIndex) {
@@ -31,17 +31,17 @@ define(function() {
 			input = $('#acp-search input'),
 			firstResult = null;
 
-		input.on('keyup', function() {
+		input.on('keyup', function () {
 			$('#acp-search .dropdown').addClass('open');
 		});
 
-		$('#acp-search').parents('form').on('submit', function(ev) {
+		$('#acp-search').parents('form').on('submit', function (ev) {
 			var input = $(this).find('input'),
 				href = firstResult ? firstResult : RELATIVE_PATH + '/search/' + input.val();
 
 			ajaxify.go(href.replace(/^\//, ''));
 
-			setTimeout(function() {
+			setTimeout(function () {
 				$('#acp-search .dropdown').removeClass('open');
 				$(input).blur();
 			}, 150);
@@ -50,24 +50,18 @@ define(function() {
 			return false;
 		});
 
-		$('.sidebar-nav a').each(function(idx, link) {
+		$('#main-menu a').each(function (idx, link) {
 			routes.push($(link).attr('href'));
 		});
 
-		input.on('blur', function() {
-			$(this).val('').attr('placeholder', '/');
-		});
-
-		input.on('keyup focus', function() {
+		input.on('keyup focus', function () {
 			var $input = $(this),
 				value = $input.val().toLowerCase(),
 				menuItems = $('#acp-search .dropdown-menu').html('');
 
-			function toUpperCase(txt){
+			function toUpperCase(txt) {
 				return txt.charAt(0).toUpperCase() + txt.substr(1).toLowerCase();
 			}
-
-			$input.attr('placeholder', '');
 
 			firstResult = null;
 
@@ -101,13 +95,18 @@ define(function() {
 					}
 				}
 
-				if (menuItems.html() !== '') {
-					menuItems.append('<li role="presentation" class="divider"></li>');
+				if (menuItems.html() === '') {
+					menuItems.append('<li role="presentation"><a role="menuitem" href="#">No results...</a></li>');
 				}
 			}
 
 			if (value.length > 0) {
-				menuItems.append('<li role="presentation"><a role="menuitem" href="' + RELATIVE_PATH + '/search/' + value + '">Search the forum for <strong>' + value + '</strong></a></li>');
+				if (config.searchEnabled) {
+					menuItems.append('<li role="presentation" class="divider"></li>');
+					menuItems.append('<li role="presentation"><a role="menuitem" target="_top" href="' + RELATIVE_PATH + '/search/' + value + '">Search the forum for <strong>' + value + '</strong></a></li>');
+				} else if (value.length < 3) {
+					menuItems.append('<li role="presentation"><a role="menuitem" href="#">Type more to see results...</a></li>');
+				}
 			} else {
 				menuItems.append('<li role="presentation"><a role="menuitem" href="#">Start typing to see results...</a></li>');
 			}

@@ -1,10 +1,10 @@
 {
     "results_matching": "%1 resuldado(s) coinciden con \"%2\". (%3 segundos)",
     "no-matches": "No se encontraron coincidencias",
+    "advanced-search": "Búsqueda Avanzada",
     "in": "En",
-    "by": "Por",
     "titles": "Títulos",
-    "titles-posts": "Títulos y publicaciones",
+    "titles-posts": "Títulos y posts",
     "posted-by": "Publicado por",
     "in-categories": "En categorías",
     "search-child-categories": "Buscar categorías hijas",

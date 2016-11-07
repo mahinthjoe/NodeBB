@@ -8,31 +8,36 @@ var	nconf = require('nconf'),
 
 	async = require('async'),
 	logrotate = require('logrotate-stream'),
+	file = require('./src/file'),
+	pkg = require('./package.json');
 
-	pkg = require('./package.json'),
+nconf.argv().env().file({
+	file: path.join(__dirname, '/config.json')
+});
 
-	pidFilePath = __dirname + '/pidfile',
+var	pidFilePath = __dirname + '/pidfile',
 	output = logrotate({ file: __dirname + '/logs/output.log', size: '1m', keep: 3, compress: true }),
-	silent = process.env.NODE_ENV !== 'development',
+	silent = nconf.get('silent') === 'false' ? false : nconf.get('silent') !== false,
 	numProcs,
 	workers = [],
 
 	Loader = {
 		timesStarted: 0,
 		js: {
-			cache: undefined,
-			map: undefined
+			target: {}
 		},
 		css: {
 			cache: undefined,
 			acpCache: undefined
-		}
+		},
+		templatesCompiled: false
 	};
 
-Loader.init = function(callback) {
+Loader.init = function (callback) {
 	if (silent) {
-		console.log = function(value) {
-			output.write(value + '\n');
+		console.log = function () {
+			var args = Array.prototype.slice.call(arguments);
+			output.write(args.join(' ') + '\n');
 		};
 	}
 
@@ -42,7 +47,7 @@ Loader.init = function(callback) {
 	callback();
 };
 
-Loader.displayStartupMessages = function(callback) {
+Loader.displayStartupMessages = function (callback) {
 	console.log('');
 	console.log('NodeBB v' + pkg.version + ' Copyright (C) 2013-2014 NodeBB Inc.');
 	console.log('This program comes with ABSOLUTELY NO WARRANTY.');
@@ -52,25 +57,25 @@ Loader.displayStartupMessages = function(callback) {
 	callback();
 };
 
-Loader.addWorkerEvents = function(worker) {
+Loader.addWorkerEvents = function (worker) {
 
-	worker.on('exit', function(code, signal) {
+	worker.on('exit', function (code, signal) {
 		if (code !== 0) {
-			if (Loader.timesStarted < numProcs*3) {
+			if (Loader.timesStarted < numProcs * 3) {
 				Loader.timesStarted++;
 				if (Loader.crashTimer) {
 					clearTimeout(Loader.crashTimer);
 				}
-				Loader.crashTimer = setTimeout(function() {
+				Loader.crashTimer = setTimeout(function () {
 					Loader.timesStarted = 0;
 				}, 10000);
 			} else {
-				console.log(numProcs*3 + ' restarts in 10 seconds, most likely an error on startup. Halting.');
+				console.log(numProcs * 3 + ' restarts in 10 seconds, most likely an error on startup. Halting.');
 				process.exit();
 			}
 		}
 
-		console.log('[cluster] Child Process (' + worker.pid + ') has exited (code: ' + code + ', signal: ' + signal +')');
+		console.log('[cluster] Child Process (' + worker.pid + ') has exited (code: ' + code + ', signal: ' + signal + ')');
 		if (!(worker.suicide || code === 0)) {
 			console.log('[cluster] Spinning up another process...');
 
@@ -78,27 +83,32 @@ Loader.addWorkerEvents = function(worker) {
 		}
 	});
 
-	worker.on('message', function(message) {
+	worker.on('message', function (message) {
 		if (message && typeof message === 'object' && message.action) {
 			switch (message.action) {
 				case 'ready':
-					if (Loader.js.cache) {
+					if (Loader.js.target['nodebb.min.js'] && Loader.js.target['acp.min.js'] && !worker.isPrimary) {
 						worker.send({
 							action: 'js-propagate',
-							cache: Loader.js.cache,
-							map: Loader.js.map,
-							hash: Loader.js.hash
+							data: Loader.js.target
 						});
 					}
 
-					if (Loader.css.cache) {
+					if (Loader.css.cache && !worker.isPrimary) {
 						worker.send({
 							action: 'css-propagate',
 							cache: Loader.css.cache,
-							acpCache: Loader.css.acpCache,
-							hash: Loader.css.hash
+							acpCache: Loader.css.acpCache
 						});
 					}
+
+					if (Loader.templatesCompiled && !worker.isPrimary) {
+						worker.send({
+							action: 'templates:compiled'
+						});
+					}
+
+
 				break;
 				case 'restart':
 					console.log('[cluster] Restarting...');
@@ -109,27 +119,28 @@ Loader.addWorkerEvents = function(worker) {
 					Loader.reload();
 				break;
 				case 'js-propagate':
-					Loader.js.cache = message.cache;
-					Loader.js.map = message.map;
-					Loader.js.hash = message.hash;
+					Loader.js.target = message.data;
 
 					Loader.notifyWorkers({
 						action: 'js-propagate',
-						cache: message.cache,
-						map: message.map,
-						hash: message.hash
+						data: message.data
 					}, worker.pid);
 				break;
 				case 'css-propagate':
 					Loader.css.cache = message.cache;
 					Loader.css.acpCache = message.acpCache;
-					Loader.css.hash = message.hash;
 
 					Loader.notifyWorkers({
 						action: 'css-propagate',
 						cache: message.cache,
-						acpCache: message.acpCache,
-						hash: message.hash
+						acpCache: message.acpCache
+					}, worker.pid);
+				break;
+				case 'templates:compiled':
+					Loader.templatesCompiled = true;
+
+					Loader.notifyWorkers({
+						action: 'templates:compiled',
 					}, worker.pid);
 				break;
 			}
@@ -137,11 +148,11 @@ Loader.addWorkerEvents = function(worker) {
 	});
 };
 
-Loader.start = function(callback) {
+Loader.start = function (callback) {
 	numProcs = getPorts().length;
 	console.log('Clustering enabled: Spinning up ' + numProcs + ' process(es).\n');
 
-	for (var x=0; x<numProcs; ++x) {
+	for (var x = 0; x < numProcs; ++x) {
 		forkWorker(x, x === 0);
 	}
 
@@ -158,7 +169,7 @@ function forkWorker(index, isPrimary) {
 	}
 
 	process.env.isPrimary = isPrimary;
-	process.env.isCluster = true;
+	process.env.isCluster = ports.length > 1 ? true : false;
 	process.env.port = ports[index];
 
 	var worker = fork('app.js', [], {
@@ -181,7 +192,12 @@ function forkWorker(index, isPrimary) {
 }
 
 function getPorts() {
-	var urlObject = url.parse(nconf.get('url'));
+	var _url = nconf.get('url');
+	if (!_url) {
+		console.log('[cluster] url is undefined, please check your config.json');
+		process.exit();
+	}
+	var urlObject = url.parse(_url);
 	var port = nconf.get('port') || nconf.get('PORT') || urlObject.port || 4567;
 	if (!Array.isArray(port)) {
 		port = [port];
@@ -189,21 +205,22 @@ function getPorts() {
 	return port;
 }
 
-Loader.restart = function() {
+Loader.restart = function () {
 	killWorkers();
-
+	nconf.remove('file');
+	nconf.use('file', { file: path.join(__dirname, '/config.json') });
 	Loader.start();
 };
 
-Loader.reload = function() {
-	workers.forEach(function(worker) {
+Loader.reload = function () {
+	workers.forEach(function (worker) {
 		worker.send({
 			action: 'reload'
 		});
 	});
 };
 
-Loader.stop = function() {
+Loader.stop = function () {
 	killWorkers();
 
 	// Clean up the pidfile
@@ -211,15 +228,15 @@ Loader.stop = function() {
 };
 
 function killWorkers() {
-	workers.forEach(function(worker) {
+	workers.forEach(function (worker) {
 		worker.suicide = true;
 		worker.kill();
 	});
 }
 
-Loader.notifyWorkers = function(msg, worker_pid) {
+Loader.notifyWorkers = function (msg, worker_pid) {
 	worker_pid = parseInt(worker_pid, 10);
-	workers.forEach(function(worker) {
+	workers.forEach(function (worker) {
 		if (parseInt(worker.pid, 10) !== worker_pid) {
 			try {
 				worker.send(msg);
@@ -230,35 +247,38 @@ Loader.notifyWorkers = function(msg, worker_pid) {
 	});
 };
 
-nconf.argv().file({
-	file: path.join(__dirname, '/config.json')
-});
+fs.open(path.join(__dirname, 'config.json'), 'r', function (err) {
+	if (!err) {
+		if (nconf.get('daemon') !== 'false' && nconf.get('daemon') !== false) {
+			if (file.existsSync(pidFilePath)) {
+				try {
+					var	pid = fs.readFileSync(pidFilePath, { encoding: 'utf-8' });
+					process.kill(pid, 0);
+					process.exit();
+				} catch (e) {
+					fs.unlinkSync(pidFilePath);
+				}
+			}
 
-if (nconf.get('daemon') !== false) {
-	if (fs.existsSync(pidFilePath)) {
-		try {
-			var	pid = fs.readFileSync(pidFilePath, { encoding: 'utf-8' });
-			process.kill(pid, 0);
-			process.exit();
-		} catch (e) {
-			fs.unlinkSync(pidFilePath);
+			require('daemon')({
+				stdout: process.stdout,
+				stderr: process.stderr
+			});
+
+			fs.writeFile(__dirname + '/pidfile', process.pid);
 		}
-	}
 
-	require('daemon')({
-		stdout: process.stdout,
-		stderr: process.stderr
-	});
-
-	fs.writeFile(__dirname + '/pidfile', process.pid);
-}
-
-async.series([
-	Loader.init,
-	Loader.displayStartupMessages,
-	Loader.start
-], function(err) {
-	if (err) {
-		console.log('[loader] Error during startup: ' + err.message);
+		async.series([
+			Loader.init,
+			Loader.displayStartupMessages,
+			Loader.start
+		], function (err) {
+			if (err) {
+				console.log('[loader] Error during startup: ' + err.message);
+			}
+		});
+	} else {
+		// No config detected, kickstart web installer
+		var child = require('child_process').fork('app');
 	}
 });

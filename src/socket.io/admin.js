@@ -1,96 +1,88 @@
 "use strict";
 
-var	async = require('async'),
-	winston = require('winston'),
-	fs = require('fs'),
-	path = require('path'),
+var async = require('async');
+var winston = require('winston');
+var nconf = require('nconf');
 
-	groups = require('../groups'),
-	meta = require('../meta'),
-	plugins = require('../plugins'),
-	widgets = require('../widgets'),
-	user = require('../user'),
-	topics = require('../topics'),
-	posts = require('../posts'),
-	categories = require('../categories'),
-	logger = require('../logger'),
-	events = require('../events'),
-	emailer = require('../emailer'),
-	db = require('../database'),
-	index = require('./index'),
+var meta = require('../meta');
+var plugins = require('../plugins');
+var widgets = require('../widgets');
+var user = require('../user');
+var logger = require('../logger');
+var events = require('../events');
+var emailer = require('../emailer');
+var db = require('../database');
+var analytics = require('../analytics');
+var index = require('./index');
 
+var SocketAdmin = {
+	user: require('./admin/user'),
+	categories: require('./admin/categories'),
+	groups: require('./admin/groups'),
+	tags: require('./admin/tags'),
+	rewards: require('./admin/rewards'),
+	navigation: require('./admin/navigation'),
+	rooms: require('./admin/rooms'),
+	social: require('./admin/social'),
+	themes: {},
+	plugins: {},
+	widgets: {},
+	config: {},
+	settings: {},
+	email: {},
+	analytics: {},
+	logs: {},
+	errors: {}
+};
 
-	SocketAdmin = {
-		user: require('./admin/user'),
-		categories: require('./admin/categories'),
-		groups: require('./admin/groups'),
-		tags: require('./admin/tags'),
-		rewards: require('./admin/rewards'),
-		navigation: require('./admin/navigation'),
-		themes: {},
-		plugins: {},
-		widgets: {},
-		config: {},
-		settings: {},
-		email: {},
-		analytics: {},
-		logs: {}
-	};
-
-SocketAdmin.before = function(socket, method, next) {
+SocketAdmin.before = function (socket, method, data, next) {
 	if (!socket.uid) {
 		return;
 	}
-	user.isAdministrator(socket.uid, function(err, isAdmin) {
-		if (!err && isAdmin) {
-			next();
-		} else {
-			winston.warn('[socket.io] Call to admin method ( ' + method + ' ) blocked (accessed by uid ' + socket.uid + ')');
+
+	user.isAdministrator(socket.uid, function (err, isAdmin) {
+		if (err || isAdmin) {
+			return next(err);
 		}
+
+		winston.warn('[socket.io] Call to admin method ( ' + method + ' ) blocked (accessed by uid ' + socket.uid + ')');
 	});
 };
 
-SocketAdmin.reload = function(socket, data, callback) {
-	events.log({
-		type: 'reload',
-		uid: socket.uid,
-		ip: socket.ip
-	});
-	if (process.send) {
-		process.send({
-			action: 'reload'
-		});
-	} else {
-		meta.reload(callback);
-	}
-};
-
-SocketAdmin.restart = function(socket, data, callback) {
+SocketAdmin.restart = function (socket, data, callback) {
 	events.log({
 		type: 'restart',
 		uid: socket.uid,
 		ip: socket.ip
 	});
 	meta.restart();
+	callback();
 };
 
-SocketAdmin.fireEvent = function(socket, data, callback) {
-	index.server.sockets.emit(data.name, data.payload || {});
+/**
+ * Reload deprecated as of v1.1.2+, remove in v2.x
+ */
+SocketAdmin.reload = SocketAdmin.restart;
+
+SocketAdmin.fireEvent = function (socket, data, callback) {
+	index.server.emit(data.name, data.payload || {});
+	callback();
 };
 
-SocketAdmin.themes.getInstalled = function(socket, data, callback) {
+SocketAdmin.themes.getInstalled = function (socket, data, callback) {
 	meta.themes.get(callback);
 };
 
-SocketAdmin.themes.set = function(socket, data, callback) {
-	if(!data) {
+SocketAdmin.themes.set = function (socket, data, callback) {
+	if (!data) {
 		return callback(new Error('[[error:invalid-data]]'));
 	}
 
-	var wrappedCallback = function(err) {
-		meta.themes.set(data, function() {
-			callback();
-		});
+	var wrappedCallback = function (err) {
+		if (err) {
+			return callback(err);
+		}
+		meta.themes.set(data, callback);
 	};
 	if (data.type === 'bootswatch') {
 		wrappedCallback();
@@ -99,37 +91,35 @@ SocketAdmin.themes.set = function(socket, data, callback) {
 	}
 };
 
-SocketAdmin.themes.updateBranding = function(socket, data, callback) {
-	meta.css.updateBranding();
-};
-
-SocketAdmin.plugins.toggleActive = function(socket, plugin_id, callback) {
+SocketAdmin.plugins.toggleActive = function (socket, plugin_id, callback) {
+	require('../posts/cache').reset();
 	plugins.toggleActive(plugin_id, callback);
 };
 
-SocketAdmin.plugins.toggleInstall = function(socket, data, callback) {
+SocketAdmin.plugins.toggleInstall = function (socket, data, callback) {
+	require('../posts/cache').reset();
 	plugins.toggleInstall(data.id, data.version, callback);
 };
 
-SocketAdmin.plugins.getActive = function(socket, data, callback) {
+SocketAdmin.plugins.getActive = function (socket, data, callback) {
 	plugins.getActive(callback);
 };
 
-SocketAdmin.plugins.orderActivePlugins = function(socket, data, callback) {
-	async.each(data, function(plugin, next) {
+SocketAdmin.plugins.orderActivePlugins = function (socket, data, callback) {
+	async.each(data, function (plugin, next) {
 		if (plugin && plugin.name) {
 			db.sortedSetAdd('plugins:active', plugin.order || 0, plugin.name, next);
 		} else {
 			next();
-		}		
+		}
 	}, callback);
 };
 
-SocketAdmin.plugins.upgrade = function(socket, data, callback) {
+SocketAdmin.plugins.upgrade = function (socket, data, callback) {
 	plugins.upgrade(data.id, data.version, callback);
 };
 
-SocketAdmin.widgets.set = function(socket, data, callback) {
+SocketAdmin.widgets.set = function (socket, data, callback) {
 	if(!data) {
 		return callback(new Error('[[error:invalid-data]]'));
 	}
@@ -137,21 +127,17 @@ SocketAdmin.widgets.set = function(socket, data, callback) {
 	widgets.setArea(data, callback);
 };
 
-SocketAdmin.config.get = function(socket, data, callback) {
-	meta.configs.list(callback);
-};
-
-SocketAdmin.config.set = function(socket, data, callback) {
-	if(!data) {
+SocketAdmin.config.set = function (socket, data, callback) {
+	if (!data) {
 		return callback(new Error('[[error:invalid-data]]'));
 	}
 
-	meta.configs.set(data.key, data.value, function(err) {
-		if(err) {
+	meta.configs.set(data.key, data.value, function (err) {
+		if (err) {
 			return callback(err);
 		}
 
-		callback(null);
+		callback();
 
 		plugins.fireHook('action:config.set', {
 			key: data.key,
@@ -162,12 +148,12 @@ SocketAdmin.config.set = function(socket, data, callback) {
 	});
 };
 
-SocketAdmin.config.setMultiple = function(socket, data, callback) {
-	if(!data) {
+SocketAdmin.config.setMultiple = function (socket, data, callback) {
+	if (!data) {
 		return callback(new Error('[[error:invalid-data]]'));
 	}
 
-	meta.configs.setMultiple(data, function(err) {
+	meta.configs.setMultiple(data, function (err) {
 		if(err) {
 			return callback(err);
 		}
@@ -187,168 +173,87 @@ SocketAdmin.config.setMultiple = function(socket, data, callback) {
 	});
 };
 
-SocketAdmin.config.remove = function(socket, key) {
+SocketAdmin.config.remove = function (socket, key, callback) {
 	meta.configs.remove(key);
+	callback();
 };
 
-SocketAdmin.settings.get = function(socket, data, callback) {
+SocketAdmin.settings.get = function (socket, data, callback) {
 	meta.settings.get(data.hash, callback);
 };
 
-SocketAdmin.settings.set = function(socket, data, callback) {
+SocketAdmin.settings.set = function (socket, data, callback) {
 	meta.settings.set(data.hash, data.values, callback);
 };
 
-SocketAdmin.settings.clearSitemapCache = function(socket, data, callback) {
+SocketAdmin.settings.clearSitemapCache = function (socket, data, callback) {
 	require('../sitemap').clearCache();
 	callback();
 };
 
-SocketAdmin.email.test = function(socket, data, callback) {
-	if (plugins.hasListeners('action:email.send')) {
-		emailer.send('test', socket.uid, {
-			subject: '[NodeBB] Test Email',
-			site_title: meta.config.title || 'NodeBB'
-		});
-		callback();
-	} else {
-		callback(new Error('[[error:no-emailers-configured]]'));
-	}
+SocketAdmin.email.test = function (socket, data, callback) {
+	var site_title = meta.config.title || 'NodeBB';
+	emailer.send(data.template, socket.uid, {
+		subject: '[' + site_title + '] Test Email',
+		site_title: site_title,
+		url: nconf.get('url')
+	}, callback);
 };
 
-SocketAdmin.analytics.get = function(socket, data, callback) {
-	data.units = 'hours'; // temp
-	data.amount = 24;
+SocketAdmin.analytics.get = function (socket, data, callback) {
+	// Default returns views from past 24 hours, by hour
+	if (data.units === 'days') {
+		data.amount = 30;
+	} else {
+		data.amount = 24;
+	}
 
 	if (data && data.graph && data.units && data.amount) {
 		if (data.graph === 'traffic') {
 			async.parallel({
-				uniqueVisitors: function(next) {
-					getHourlyStatsForSet('analytics:uniquevisitors', data.amount, next);
+				uniqueVisitors: function (next) {
+					if (data.units === 'days') {
+						analytics.getDailyStatsForSet('analytics:uniquevisitors', data.until || Date.now(), data.amount, next);
+					} else {
+						analytics.getHourlyStatsForSet('analytics:uniquevisitors', data.until || Date.now(), data.amount, next);
+					}
 				},
-				pageviews: function(next) {
-					getHourlyStatsForSet('analytics:pageviews', data.amount, next);
+				pageviews: function (next) {
+					if (data.units === 'days') {
+						analytics.getDailyStatsForSet('analytics:pageviews', data.until || Date.now(), data.amount, next);
+					} else {
+						analytics.getHourlyStatsForSet('analytics:pageviews', data.until || Date.now(), data.amount, next);
+					}
 				},
-				monthlyPageViews: function(next) {
-					getMonthlyPageViews(next);
+				monthlyPageViews: function (next) {
+					analytics.getMonthlyPageViews(next);
 				}
-			}, callback);
+			}, function (err, data) {
+				data.pastDay = data.pageviews.reduce(function (a, b) {return parseInt(a, 10) + parseInt(b, 10);});
+				data.pageviews[data.pageviews.length - 1] = parseInt(data.pageviews[data.pageviews.length - 1], 10) + analytics.getUnwrittenPageviews();
+				callback(err, data);
+			});
 		}
 	} else {
 		callback(new Error('Invalid analytics call'));
 	}
 };
 
-SocketAdmin.logs.get = function(socket, data, callback) {
+SocketAdmin.logs.get = function (socket, data, callback) {
 	meta.logs.get(callback);
 };
 
-SocketAdmin.logs.clear = function(socket, data, callback) {
+SocketAdmin.logs.clear = function (socket, data, callback) {
 	meta.logs.clear(callback);
 };
 
-function getHourlyStatsForSet(set, hours, callback) {
-	var hour = new Date(),
-		terms = {},
-		hoursArr = [];
-
-	hour.setHours(hour.getHours(), 0, 0, 0);
-
-	for (var i = 0, ii = hours; i < ii; i++) {
-		hoursArr.push(hour.getTime());
-		hour.setHours(hour.getHours() - 1, 0, 0, 0);
-	}
-
-	db.sortedSetScores(set, hoursArr, function(err, counts) {
-		if (err) {
-			return callback(err);
-		}
-
-		hoursArr.forEach(function(term, index) {
-			terms[term] = counts[index] || 0;
-		});
-
-		var termsArr = [];
-
-		hoursArr.reverse();
-		hoursArr.forEach(function(hour, idx) {
-			termsArr.push(terms[hour]);
-		});
-
-		callback(null, termsArr);
-	});
-}
-
-function getMonthlyPageViews(callback) {
-	var thisMonth = new Date();
-	var lastMonth = new Date();
-	thisMonth.setMonth(thisMonth.getMonth(), 1);
-	thisMonth.setHours(0, 0, 0, 0);
-	lastMonth.setMonth(thisMonth.getMonth() - 1, 1);
-	lastMonth.setHours(0, 0, 0, 0);
-
-	var values = [thisMonth.getTime(), lastMonth.getTime()];
-
-	db.sortedSetScores('analytics:pageviews:month', values, function(err, scores) {
-		if (err) {
-			return callback(err);
-		}
-		callback(null, {thisMonth: scores[0] || 0, lastMonth: scores[1] || 0});
-	});
-}
-
-SocketAdmin.getMoreEvents = function(socket, next, callback) {
-	var start = parseInt(next, 10);
-	if (start < 0) {
-		return callback(null, {data: [], next: next});
-	}
-	var end = next + 10;
-	events.getEvents(start, end, function(err, events) {
-		if (err) {
-			return callback(err);
-		}
-		callback(null, {events: events, next: end + 1});
-	});
+SocketAdmin.errors.clear = function (socket, data, callback) {
+	meta.errors.clear(callback);
 };
 
-SocketAdmin.deleteAllEvents = function(socket, data, callback) {
+SocketAdmin.deleteAllEvents = function (socket, data, callback) {
 	events.deleteAll(callback);
 };
 
-SocketAdmin.dismissFlag = function(socket, pid, callback) {
-	if (!pid) {
-		return callback('[[error:invalid-data]]');
-	}
-
-	posts.dismissFlag(pid, callback);
-};
-
-SocketAdmin.dismissAllFlags = function(socket, data, callback) {
-	posts.dismissAllFlags(callback);
-};
-
-SocketAdmin.getMoreFlags = function(socket, data, callback) {
-	if (!data || !parseInt(data.after, 10)) {
-		return callback('[[error:invalid-data]]');
-	}
-	var sortBy = data.sortBy || 'count';
-	var byUsername = data.byUsername ||  '';
-	var start = parseInt(data.after, 10);
-	var end = start + 19;
-	if (byUsername) {
-		posts.getUserFlags(byUsername, sortBy, socket.uid, start, end, function(err, posts) {
-			callback(err, {posts: posts, next: end + 1});
-		});
-	} else {		
-		var set = sortBy === 'count' ? 'posts:flags:count' : 'posts:flagged';
-		posts.getFlags(set, socket.uid, start, end, function(err, posts) {
-			callback(err, {posts: posts, next: end + 1});
-		});
-	}	
-};
-
-SocketAdmin.takeHeapSnapshot = function(socket, data, callback) {
-	require('heapdump').writeSnapshot(callback);
-};
 
 module.exports = SocketAdmin;

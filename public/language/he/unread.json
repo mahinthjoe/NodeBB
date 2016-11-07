@@ -5,5 +5,9 @@
     "mark_as_read": "סמן כנקרא",
     "selected": "נבחר",
     "all": "הכל",
-    "topics_marked_as_read.success": "נושאים שמסומנים כנקרא!"
+    "all_categories": "כל הקטגוריות",
+    "topics_marked_as_read.success": "נושאים שמסומנים כנקרא!",
+    "all-topics": "All Topics",
+    "new-topics": "New Topics",
+    "watched-topics": "Watched Topics"
 }

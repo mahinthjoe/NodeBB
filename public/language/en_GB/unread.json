@@ -5,5 +5,9 @@
 	"mark_as_read": "Mark as Read",
 	"selected": "Selected",
 	"all": "All",
-	"topics_marked_as_read.success": "Topics marked as read!"
+	"all_categories": "All categories",
+	"topics_marked_as_read.success": "Topics marked as read!",
+	"all-topics": "All Topics",
+	"new-topics": "New Topics",
+	"watched-topics": "Watched Topics"
 }

@@ -5,5 +5,9 @@
     "mark_as_read": "Tandai Sudah Dibaca",
     "selected": "Terpilih",
     "all": "Semua",
-    "topics_marked_as_read.success": "Topik ditandai sudah dibaca!"
+    "all_categories": "Semua Kategori",
+    "topics_marked_as_read.success": "Topik ditandai sudah dibaca!",
+    "all-topics": "All Topics",
+    "new-topics": "New Topics",
+    "watched-topics": "Watched Topics"
 }

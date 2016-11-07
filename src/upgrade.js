@@ -3,58 +3,55 @@
 var db = require('./database'),
 	async = require('async'),
 	winston = require('winston'),
-	fs = require('fs'),
-	path = require('path'),
-
-	User = require('./user'),
-	Topics = require('./topics'),
-	Posts = require('./posts'),
-	Categories = require('./categories'),
-	Groups = require('./groups'),
-	Meta = require('./meta'),
-	Plugins = require('./plugins'),
-	Utils = require('../public/src/utils'),
 
 	Upgrade = {},
 
-	minSchemaDate = Date.UTC(2014, 9, 22),		// This value gets updated every new MINOR version
+	minSchemaDate = Date.UTC(2015, 10, 6),		// This value gets updated every new MAJOR version
 	schemaDate, thisSchemaDate,
 
 	// IMPORTANT: REMEMBER TO UPDATE VALUE OF latestSchema
-	latestSchema = Date.UTC(2015, 1, 25, 6);
+	latestSchema = Date.UTC(2016, 9, 14);
 
-Upgrade.check = function(callback) {
-	db.get('schemaDate', function(err, value) {
-		if(!value) {
-			db.set('schemaDate', latestSchema, function(err) {
-				callback(true);
+Upgrade.check = function (callback) {
+	db.get('schemaDate', function (err, value) {
+		if (err) {
+			return callback(err);
+		}
+
+		if (!value) {
+			db.set('schemaDate', latestSchema, function (err) {
+				if (err) {
+					return callback(err);
+				}
+				callback(null);
 			});
 			return;
 		}
 
-		if (parseInt(value, 10) >= latestSchema) {
-			callback(true);
-		} else {
-			callback(false);
-		}
+		var schema_ok = parseInt(value, 10) >= latestSchema;
+		callback(!schema_ok ? new Error('schema-out-of-date') : null);
 	});
 };
 
-Upgrade.update = function(schemaDate, callback) {
+Upgrade.update = function (schemaDate, callback) {
 	db.set('schemaDate', schemaDate, callback);
 };
 
-Upgrade.upgrade = function(callback) {
+Upgrade.upgrade = function (callback) {
 	var updatesMade = false;
 
 	winston.info('Beginning database schema update');
 
 	async.series([
-		function(next) {
+		function (next) {
 			// Prepare for upgrade & check to make sure the upgrade is possible
-			db.get('schemaDate', function(err, value) {
+			db.get('schemaDate', function (err, value) {
+				if (err) {
+					return next(err);
+				}
+
 				if(!value) {
-					db.set('schemaDate', latestSchema, function(err) {
+					db.set('schemaDate', latestSchema, function () {
 						next();
 					});
 					schemaDate = latestSchema;
@@ -69,924 +66,914 @@ Upgrade.upgrade = function(callback) {
 				}
 			});
 		},
-		function(next) {
-			thisSchemaDate = Date.UTC(2014, 9, 31);
+		function (next) {
+			thisSchemaDate = Date.UTC(2015, 11, 15);
+
 			if (schemaDate < thisSchemaDate) {
 				updatesMade = true;
-				winston.info('[2014/10/31] Applying newbiePostDelay values');
+				winston.info('[2015/12/15] Upgrading chats');
 
-				async.series([
-					async.apply(Meta.configs.setOnEmpty, 'newbiePostDelay', '120'),
-					async.apply(Meta.configs.setOnEmpty, 'newbiePostDelayThreshold', '3')
-				], function(err) {
+				db.getObjectFields('global', ['nextMid', 'nextChatRoomId'], function (err, globalData) {
 					if (err) {
-						winston.error('[2014/10/31] Error encountered while Applying newbiePostDelay values');
 						return next(err);
 					}
-					winston.info('[2014/10/31] Applying newbiePostDelay values done');
-					Upgrade.update(thisSchemaDate, next);
-				});
-			} else {
-				winston.info('[2014/10/31] Applying newbiePostDelay values skipped');
-				next();
-			}
-		},
-		function(next) {
-			thisSchemaDate = Date.UTC(2014, 10, 6, 18, 30);
-			if (schemaDate < thisSchemaDate) {
-				updatesMade = true;
-				winston.info('[2014/11/6] Updating topic authorship sorted set');
 
-				async.waterfall([
-					async.apply(db.getObjectField, 'global', 'nextTid'),
-					function(nextTid, next) {
-						var tids = [];
-						for(var x=1,numTids=nextTid-1;x<numTids;x++) {
-							tids.push(x);
-						}
-						async.filter(tids, function(tid, next) {
-							db.exists('topic:' + tid, function(err, exists) {
-								next(exists);
-							});
-						}, function(tids) {
-							next(null, tids);
-						});
-					},
-					function(tids, next) {
-						async.eachLimit(tids, 100, function(tid, next) {
-							Topics.getTopicFields(tid, ['uid', 'cid', 'tid', 'timestamp'], function(err, data) {
-								if (!err && (data.cid && data.uid && data.timestamp && data.tid)) {
-									db.sortedSetAdd('cid:' + data.cid + ':uid:' + data.uid + ':tid', data.timestamp, data.tid, next);
-								} else {
-									// Post was probably purged, skip record
-									next();
-								}
-							});
-						}, next);
-					}
-				], function(err) {
-					if (err) {
-						winston.error('[2014/11/6] Error encountered while Updating topic authorship sorted set');
-						return next(err);
-					}
-					winston.info('[2014/11/6] Updating topic authorship sorted set done');
-					Upgrade.update(thisSchemaDate, next);
-				});
-			} else {
-				winston.info('[2014/11/6] Updating topic authorship sorted set skipped');
-				next();
-			}
-		},
-		function(next) {
-			thisSchemaDate = Date.UTC(2014, 10, 7);
-			if (schemaDate < thisSchemaDate) {
-				updatesMade = true;
-				winston.info('[2014/11/7] Renaming sorted set names');
+					var rooms = {};
+					var roomId = globalData.nextChatRoomId || 1;
+					var currentMid = 1;
 
-				async.waterfall([
-					function(next) {
-						async.parallel({
-							cids: function(next) {
-								db.getSortedSetRange('categories:cid', 0, -1, next);
-							},
-							uids: function(next) {
-								db.getSortedSetRange('users:joindate', 0, -1, next);
-							}
-						}, next);
-					},
-					function(results, next) {
-						async.eachLimit(results.cids, 50, function(cid, next) {
-							async.parallel([
-								function(next) {
-									db.exists('categories:' + cid + ':tid', function(err, exists) {
-										if (err || !exists) {
-											return next(err);
-										}
-										db.rename('categories:' + cid + ':tid', 'cid:' + cid + ':tids', next);
-									});
-								},
-								function(next) {
-									db.exists('categories:recent_posts:cid:' + cid, function(err, exists) {
-										if (err || !exists) {
-											return next(err);
-										}
-										db.rename('categories:recent_posts:cid:' + cid, 'cid:' + cid + ':pids', next);
-									});
-								},
-								function(next) {
-									async.eachLimit(results.uids, 50, function(uid, next) {
-										db.exists('cid:' + cid + ':uid:' + uid + ':tid', function(err, exists) {
-											if (err || !exists) {
-												return next(err);
-											}
-											db.rename('cid:' + cid + ':uid:' + uid + ':tid', 'cid:' + cid + ':uid:' + uid + ':tids', next);
-										});
-									}, next);
-								}
-							], next);
-						}, next);
-					}
-				], function(err) {
-					if (err) {
-						winston.error('[2014/11/7] Error encountered while renaming sorted sets');
-						return next(err);
-					}
-					winston.info('[2014/11/7] Renaming sorted sets done');
-					Upgrade.update(thisSchemaDate, next);
-				});
-			} else {
-				winston.info('[2014/11/7] Renaming sorted sets skipped');
-				next();
-			}
-		},
-		function(next) {
-			thisSchemaDate = Date.UTC(2014, 10, 11);
-			if (schemaDate < thisSchemaDate) {
-				updatesMade = true;
-				winston.info('[2014/11/11] Upgrading permissions');
-
-				async.waterfall([
-					function(next) {
-						db.getSortedSetRange('categories:cid', 0, -1, next);
-					},
-					function(cids, next) {
-						function categoryHasPrivilegesSet(cid, privilege, next) {
-							async.parallel({
-								userPrivExists: function(next) {
-									Groups.getMemberCount('cid:' + cid + ':privileges:' + privilege, next);
-								},
-								groupPrivExists: function(next) {
-									Groups.getMemberCount('cid:' + cid + ':privileges:groups:' + privilege, next);
-								}
-							}, function(err, results) {
-								if (err) {
-									return next(err);
-								}
-								next(null, results.userPrivExists || results.groupPrivExists);
-							});
-						}
-
-						function upgradePrivileges(cid, groups, next) {
-							var privs = ['find', 'read', 'topics:reply', 'topics:create'];
-
-							async.each(privs, function(priv, next) {
-
-								categoryHasPrivilegesSet(cid, priv, function(err, privilegesSet) {
-									if (err || privilegesSet) {
-										return next(err);
+					async.whilst(function () {
+						return currentMid <= globalData.nextMid;
+					}, function (next) {
+						db.getObject('message:' + currentMid, function (err, message) {
+							function addMessageToUids(roomId, callback) {
+								async.parallel([
+									function (next) {
+										db.sortedSetAdd('uid:' + message.fromuid + ':chat:room:' + roomId + ':mids', msgTime, currentMid, next);
+									},
+									function (next) {
+										db.sortedSetAdd('uid:' + message.touid + ':chat:room:' + roomId + ':mids', msgTime, currentMid, next);
 									}
-
-									async.eachLimit(groups, 50, function(group, next) {
-										if (group && !group.hidden) {
-											if (group.name === 'guests' && (priv === 'topics:reply' || priv === 'topics:create')) {
-												return next();
-											}
-											Groups.join('cid:' + cid + ':privileges:groups:' + priv, group.name, next);
-										} else {
-											next();
-										}
-									}, next);
-								});
-							}, next);
-						}
-
-						async.waterfall([
-							async.apply(db.getSetMembers, 'groups'),
-							function(groups, next) {
-								async.filter(groups, function(group, next) {
-									db.getObjectField('group:' + group, 'hidden', function(err, hidden) {
-										next(!parseInt(hidden, 10));
-									}, next);
-								}, function(groups) {
-									next(null, groups);
-								});
+								], callback);
 							}
-						], function(err, groups) {
-							if (err) {
+
+							if (err || !message)  {
+								winston.info('skipping chat message ', currentMid);
+								currentMid ++;
 								return next(err);
 							}
 
-							groups.push('administrators', 'registered-users');
+							var pairID = [parseInt(message.fromuid, 10), parseInt(message.touid, 10)].sort().join(':');
+							var msgTime = parseInt(message.timestamp, 10);
 
-							async.eachLimit(cids, 50, function(cid, next) {
-								upgradePrivileges(cid, groups, next);
-							}, next);
+							if (rooms[pairID]) {
+								winston.info('adding message ' + currentMid + ' to existing roomID ' + roomId);
+								addMessageToUids(rooms[pairID], function (err) {
+									if (err) {
+										return next(err);
+									}
+									currentMid ++;
+									next();
+								});
+							} else {
+								winston.info('adding message ' + currentMid + ' to new roomID ' + roomId);
+								async.parallel([
+									function (next) {
+										db.sortedSetAdd('uid:' + message.fromuid + ':chat:rooms', msgTime, roomId, next);
+									},
+									function (next) {
+										db.sortedSetAdd('uid:' + message.touid + ':chat:rooms', msgTime, roomId, next);
+									},
+									function (next) {
+										db.sortedSetAdd('chat:room:' + roomId + ':uids', [msgTime, msgTime + 1], [message.fromuid, message.touid], next);
+									},
+									function (next) {
+										addMessageToUids(roomId, next);
+									}
+								], function (err) {
+									if (err) {
+										return next(err);
+									}
+									rooms[pairID] = roomId;
+									roomId ++;
+									currentMid ++;
+									db.setObjectField('global', 'nextChatRoomId', roomId, next);
+								});
+							}
 						});
-					}
-				], function(err) {
-					if (err) {
-						winston.error('[2014/11/11] Error encountered while upgrading permissions');
-						return next(err);
-					}
-					winston.info('[2014/11/11] Upgrading permissions done');
-					Upgrade.update(thisSchemaDate, next);
+					}, function (err) {
+						if (err) {
+							return next(err);
+						}
+
+						winston.info('[2015/12/15] Chats upgrade done!');
+						Upgrade.update(thisSchemaDate, next);
+					});
 				});
 			} else {
-				winston.info('[2014/11/11] Upgrading permissions skipped');
+				winston.info('[2015/12/15] Chats upgrade skipped!');
 				next();
 			}
 		},
-		function(next) {
-			thisSchemaDate = Date.UTC(2014, 10, 17, 13);
+		function (next) {
+			thisSchemaDate = Date.UTC(2015, 11, 23);
+
 			if (schemaDate < thisSchemaDate) {
 				updatesMade = true;
-				winston.info('[2014/11/17] Updating user email digest settings');
+				winston.info('[2015/12/23] Upgrading chat room hashes');
 
-				async.waterfall([
-					async.apply(db.getSortedSetRange, 'users:joindate', 0, -1),
-					function(uids, next) {
-						async.filter(uids, function(uid, next) {
-							db.getObjectField('user:' + uid + ':settings', 'dailyDigestFreq', function(err, freq) {
-								next(freq === 'daily');
-							});
-						}, function(uids) {
-							next(null, uids);
-						});
-					},
-					function(uids, next) {
-						async.each(uids, function(uid, next) {
-							db.setObjectField('user:' + uid + ':settings', 'dailyDigestFreq', 'day', next);
-						}, next);
-					}
-				], function(err) {
+				db.getObjectField('global', 'nextChatRoomId', function (err, nextChatRoomId) {
 					if (err) {
-						winston.error('[2014/11/17] Error encountered while updating user email digest settings');
 						return next(err);
 					}
-					winston.info('[2014/11/17] Updating user email digest settings done');
-					Upgrade.update(thisSchemaDate, next);
-				});
-			} else {
-				winston.info('[2014/11/17] Updating user email digest settings skipped');
-				next();
-			}
-		},
-		function(next) {
-			thisSchemaDate = Date.UTC(2014, 10, 29, 22);
-			if (schemaDate < thisSchemaDate) {
-				updatesMade = true;
-				winston.info('[2014/11/29] Updating config.json to new format');
-				var configPath = path.join(__dirname, '../config.json');
-
-				async.waterfall([
-					async.apply(fs.readFile, configPath, { encoding: 'utf-8' }),
-					function(config, next) {
-						try {
-							config = JSON.parse(config);
-
-							// If the config contains "url", it has already been updated, abort.
-							if (config.hasOwnProperty('url')) {
+					var currentChatRoomId = 1;
+					async.whilst(function () {
+						return currentChatRoomId <= nextChatRoomId;
+					}, function (next) {
+						db.getSortedSetRange('chat:room:' + currentChatRoomId + ':uids', 0, 0, function (err, uids) {
+							if (err) {
+								return next(err);
+							}
+							if (!Array.isArray(uids) || !uids.length || !uids[0]) {
+								++ currentChatRoomId;
 								return next();
 							}
 
-							config.url = config.base_url + (config.use_port ? ':' + config.port : '') + config.relative_path;
-							if (config.port == '4567') {
-								delete config.port;
-							}
-							if (config.bcrypt_rounds == 12) {
-								delete config.bcrypt_rounds;
-							}
-							if (config.upload_path === '/public/uploads') {
-								delete config.upload_path;
-							}
-							if (config.bind_address === '0.0.0.0') {
-								delete config.bind_address;
-							}
-							delete config.base_url;
-							delete config.use_port;
-							delete config.relative_path;
-
-							fs.writeFile(configPath, JSON.stringify(config, null, 4), next);
-						} catch (err) {
+							db.setObject('chat:room:' + currentChatRoomId, {owner: uids[0], roomId: currentChatRoomId}, function (err) {
+								if (err) {
+									return next(err);
+								}
+								++ currentChatRoomId;
+								next();
+							});
+						});
+					}, function (err) {
+						if (err) {
 							return next(err);
 						}
-					}
-				], function(err) {
+
+						winston.info('[2015/12/23] Chats room hashes upgrade done!');
+						Upgrade.update(thisSchemaDate, next);
+					});
+				});
+			} else {
+				winston.info('[2015/12/23] Chats room hashes upgrade skipped!');
+				next();
+			}
+		},
+		function (next) {
+			thisSchemaDate = Date.UTC(2016, 0, 11);
+
+			if (schemaDate < thisSchemaDate) {
+				updatesMade = true;
+				winston.info('[2015/12/23] Adding theme to active plugins sorted set');
+
+				async.waterfall([
+					async.apply(db.getObjectField, 'config', 'theme:id'),
+					async.apply(db.sortedSetAdd, 'plugins:active', 0)
+				], function (err) {
 					if (err) {
-						winston.error('[2014/11/29] Error encountered while updating config.json to new format');
 						return next(err);
 					}
-					winston.info('[2014/11/29] Updating config.json to new format done');
+
+					winston.info('[2015/12/23] Adding theme to active plugins sorted set done!');
 					Upgrade.update(thisSchemaDate, next);
 				});
 			} else {
-				winston.info('[2014/11/29] Updating config.json to new format skipped');
+				winston.info('[2015/12/23] Adding theme to active plugins sorted set skipped!');
 				next();
 			}
 		},
-		function(next) {
-			thisSchemaDate = Date.UTC(2014, 11, 2);
+		function (next) {
+			thisSchemaDate = Date.UTC(2016, 0, 14);
+
 			if (schemaDate < thisSchemaDate) {
 				updatesMade = true;
-				winston.info('[2014/12/2] Removing register user fields');
+				winston.info('[2016/01/14] Creating user best post sorted sets');
 
-				db.getSortedSetRange('users:joindate', 0, -1, function(err, uids) {
+				var batch = require('./batch');
+
+				batch.processSortedSet('posts:pid', function (ids, next) {
+					async.eachSeries(ids, function (id, next) {
+						db.getObjectFields('post:' + id, ['pid', 'uid', 'votes'], function (err, postData) {
+							if (err) {
+								return next(err);
+							}
+							if (!postData || !parseInt(postData.votes, 10) || !parseInt(postData.uid, 10)) {
+								return next();
+							}
+							winston.info('processing pid: ' + postData.pid + ' uid: ' + postData.uid + ' votes: ' + postData.votes);
+							db.sortedSetAdd('uid:' + postData.uid + ':posts:votes', postData.votes, postData.pid, next);
+						});
+					}, next);
+				}, {}, function (err) {
 					if (err) {
 						return next(err);
 					}
-					var fieldsToDelete = [
-						'password-confirm',
-						'recaptcha_challenge_field',
-						'_csrf',
-						'recaptcha_response_field',
-						'referrer'
-					];
+					winston.info('[2016/01/14] Creating user best post sorted sets done!');
+					Upgrade.update(thisSchemaDate, next);
+				});
+			} else {
+				winston.info('[2016/01/14] Creating user best post sorted sets skipped!');
+				next();
+			}
+		},
+		function (next) {
+			thisSchemaDate = Date.UTC(2016, 0, 20);
 
-					async.eachLimit(uids, 50, function(uid, next) {
-						async.each(fieldsToDelete, function(field, next) {
-							db.deleteObjectField('user:' + uid, field, next);
+			if (schemaDate < thisSchemaDate) {
+				updatesMade = true;
+				winston.info('[2016/01/20] Creating users:notvalidated');
+
+				var batch = require('./batch');
+				var now = Date.now();
+				batch.processSortedSet('users:joindate', function (ids, next) {
+					async.eachSeries(ids, function (id, next) {
+						db.getObjectFields('user:' + id, ['uid', 'email:confirmed'], function (err, userData) {
+							if (err) {
+								return next(err);
+							}
+							if (!userData || !parseInt(userData.uid, 10) || parseInt(userData['email:confirmed'], 10) === 1) {
+								return next();
+							}
+							winston.info('processing uid: ' + userData.uid + ' email:confirmed: ' + userData['email:confirmed']);
+							db.sortedSetAdd('users:notvalidated', now, userData.uid, next);
+						});
+					}, next);
+				}, {}, function (err) {
+					if (err) {
+						return next(err);
+					}
+					winston.info('[2016/01/20] Creating users:notvalidated done!');
+					Upgrade.update(thisSchemaDate, next);
+				});
+			} else {
+				winston.info('[2016/01/20] Creating users:notvalidated skipped!');
+				next();
+			}
+		},
+		function (next) {
+			thisSchemaDate = Date.UTC(2016, 0, 23);
+
+			if (schemaDate < thisSchemaDate) {
+				updatesMade = true;
+				winston.info('[2016/01/23] Creating Global moderators group');
+
+				var groups = require('./groups');
+				async.waterfall([
+					function (next) {
+						groups.exists('Global Moderators', next);
+					},
+					function (exists, next) {
+						if (exists) {
+							return next(null, null);
+						}
+						groups.create({
+							name: 'Global Moderators',
+							userTitle: 'Global Moderator',
+							description: 'Forum wide moderators',
+							hidden: 0,
+							private: 1,
+							disableJoinRequests: 1
 						}, next);
-					}, function(err) {
-						if (err) {
-							winston.error('[2014/12/2] Error encountered while deleting user fields');
-							return next(err);
-						}
-						winston.info('[2014/12/2] Removing register user fields done');
-						Upgrade.update(thisSchemaDate, next);
-					});
-				});
-			} else {
-				winston.info('[2014/12/2] Removing register user fields skipped');
-				next();
-			}
-		},
-		function(next) {
-			thisSchemaDate = Date.UTC(2014, 11, 12);
-			if (schemaDate < thisSchemaDate) {
-				updatesMade = true;
-				winston.info('[2014/12/12] Updating teasers');
-
-				db.getSortedSetRange('topics:tid', 0, -1, function(err, tids) {
+					},
+					function (groupData, next) {
+						groups.show('Global Moderators', next);
+					}
+				], function (err) {
 					if (err) {
 						return next(err);
 					}
 
-					async.eachLimit(tids, 50, function(tid, next) {
-						Topics.updateTeaser(tid, next);
-					}, function(err) {
-						if (err) {
-							winston.error('[2014/12/12] Error encountered while updating teasers');
-							return next(err);
-						}
-						winston.info('[2014/12/12] Updating teasers done');
-						Upgrade.update(thisSchemaDate, next);
-					});
+					winston.info('[2016/01/23] Creating Global moderators group done!');
+					Upgrade.update(thisSchemaDate, next);
 				});
 			} else {
-				winston.info('[2014/12/12] Updating teasers skipped');
+				winston.info('[2016/01/23] Creating Global moderators group skipped!');
 				next();
 			}
 		},
-		function(next) {
-			thisSchemaDate = Date.UTC(2014, 11, 20);
+		function (next) {
+			thisSchemaDate = Date.UTC(2016, 1, 25);
+
 			if (schemaDate < thisSchemaDate) {
 				updatesMade = true;
-				winston.info('[2014/12/20] Updating digest settings');
+				winston.info('[2016/02/25] Social: Post Sharing');
+
+				var social = require('./social');
+				async.parallel([
+					function (next) {
+						social.setActivePostSharingNetworks(['facebook', 'google', 'twitter'], next);
+					},
+					function (next) {
+						db.deleteObjectField('config', 'disableSocialButtons', next);
+					}
+				], function (err) {
+					if (err) {
+						return next(err);
+					}
+
+					winston.info('[2016/02/25] Social: Post Sharing done!');
+					Upgrade.update(thisSchemaDate, next);
+				});
+			} else {
+				winston.info('[2016/02/25] Social: Post Sharing skipped!');
+				next();
+			}
+		},
+		function (next) {
+			thisSchemaDate = Date.UTC(2016, 3, 14);
+
+			if (schemaDate < thisSchemaDate) {
+				updatesMade = true;
+				winston.info('[2016/04/14] Group title from settings to user profile');
+
+				var user = require('./user');
+				var batch = require('./batch');
+				var count = 0;
+				batch.processSortedSet('users:joindate', function (uids, next) {
+					winston.info('upgraded ' + count + ' users');
+					user.getMultipleUserSettings(uids, function (err, settings) {
+						if (err) {
+							return next(err);
+						}
+						count += uids.length;
+						settings = settings.filter(function (setting) {
+							return setting && setting.groupTitle;
+						});
+
+						async.each(settings, function (setting, next) {
+							db.setObjectField('user:' + setting.uid, 'groupTitle', setting.groupTitle, next);
+						}, next);
+					});
+				}, {}, function (err) {
+					if (err) {
+						return next(err);
+					}
+
+					winston.info('[2016/04/14] Group title from settings to user profile done');
+					Upgrade.update(thisSchemaDate, next);
+				});
+			} else {
+				winston.info('[2016/04/14] Group title from settings to user profile skipped!');
+				next();
+			}
+		},
+		function (next) {
+			thisSchemaDate = Date.UTC(2016, 3, 18);
+
+			if (schemaDate < thisSchemaDate) {
+				updatesMade = true;
+				winston.info('[2016/04/19] Users post count per tid');
+
+				var batch = require('./batch');
+				var topics = require('./topics');
+				var count = 0;
+				batch.processSortedSet('topics:tid', function (tids, next) {
+					winston.info('upgraded ' + count + ' topics');
+					count += tids.length;
+					async.each(tids, function (tid, next) {
+						db.delete('tid:' + tid + ':posters', function (err) {
+							if (err) {
+								return next(err);
+							}
+							topics.getPids(tid, function (err, pids) {
+								if (err) {
+									return next(err);
+								}
+
+								if (!pids.length) {
+									return next();
+								}
+
+								async.eachSeries(pids, function (pid, next) {
+									db.getObjectField('post:' + pid, 'uid', function (err, uid) {
+										if (err) {
+											return next(err);
+										}
+										if (!parseInt(uid, 10)) {
+											return next();
+										}
+										db.sortedSetIncrBy('tid:' + tid + ':posters', 1, uid, next);
+									});
+								}, next);
+							});
+						});
+					}, next);
+				}, {}, function (err) {
+					if (err) {
+						return next(err);
+					}
+
+					winston.info('[2016/04/19] Users post count per tid done');
+					Upgrade.update(thisSchemaDate, next);
+				});
+			} else {
+				winston.info('[2016/04/19] Users post count per tid skipped!');
+				next();
+			}
+		},
+		function (next) {
+			thisSchemaDate = Date.UTC(2016, 3, 29);
+
+			if (schemaDate < thisSchemaDate) {
+				updatesMade = true;
+				winston.info('[2016/04/29] Dismiss flags from deleted topics');
+
+				var posts = require('./posts'),
+					topics = require('./topics');
+
+				var pids, tids;
 
 				async.waterfall([
-					async.apply(db.getSortedSetRange, 'users:joindate', 0, -1),
-					async.apply(User.getMultipleUserSettings)
-				], function(err, userSettings) {
+					async.apply(db.getSortedSetRange, 'posts:flagged', 0, -1),
+					function (_pids, next) {
+						pids = _pids;
+						posts.getPostsFields(pids, ['tid'], next);
+					},
+					function (_tids, next) {
+						tids = _tids.map(function (a) {
+							return a.tid;
+						});
+
+						topics.getTopicsFields(tids, ['deleted'], next);
+					},
+					function (state, next) {
+						var toDismiss = state.map(function (a, idx) {
+							return parseInt(a.deleted, 10) === 1 ? pids[idx] : null;
+						}).filter(Boolean);
+
+						winston.info('[2016/04/29] ' + toDismiss.length + ' dismissable flags found');
+						async.each(toDismiss, posts.dismissFlag, next);
+					}
+				], function (err) {
 					if (err) {
-						winston.error('[2014/12/20] Error encountered while updating digest settings');
 						return next(err);
 					}
 
-					var now = Date.now();
-
-					async.eachLimit(userSettings, 50, function(setting, next) {
-						if (setting.dailyDigestFreq !== 'off') {
-							db.sortedSetAdd('digest:' + setting.dailyDigestFreq + ':uids', now, setting.uid, next);
-						} else {
-							setImmediate(next);
-						}
-					}, function(err) {
-						if (err) {
-							winston.error('[2014/12/20] Error encountered while updating digest settings');
-							return next(err);
-						}
-						winston.info('[2014/12/20] Updating digest settings done');
-						Upgrade.update(thisSchemaDate, next);
-					});
+					winston.info('[2016/04/29] Dismiss flags from deleted topics done');
+					Upgrade.update(thisSchemaDate, next);
 				});
 			} else {
-				winston.info('[2014/12/20] Updating digest settings skipped');
+				winston.info('[2016/04/29] Dismiss flags from deleted topics skipped!');
 				next();
 			}
 		},
-		function(next) {
-			thisSchemaDate = Date.UTC(2015, 0, 8);
+		function (next) {
+			thisSchemaDate = Date.UTC(2016, 4, 28);
+
 			if (schemaDate < thisSchemaDate) {
 				updatesMade = true;
-				winston.info('[2015/01/08] Updating category topics sorted sets');
+				winston.info('[2016/05/28] Giving topics:read privs to any group that was previously allowed to Find & Access Category');
 
-				db.getSortedSetRange('topics:tid', 0, -1, function(err, tids) {
+				var groupsAPI = require('./groups');
+				var privilegesAPI = require('./privileges');
+
+				db.getSortedSetRange('categories:cid', 0, -1, function (err, cids) {
 					if (err) {
-						winston.error('[2015/01/08] Error encountered while Updating category topics sorted sets');
 						return next(err);
 					}
 
-					var now = Date.now();
-
-					async.eachLimit(tids, 50, function(tid, next) {
-						db.getObjectFields('topic:' + tid, ['cid', 'postcount'], function(err, topicData) {
+					async.eachSeries(cids, function (cid, next) {
+						privilegesAPI.categories.list(cid, function (err, data) {
 							if (err) {
 								return next(err);
 							}
 
-							if (Utils.isNumber(topicData.postcount) && topicData.cid) {
-								db.sortedSetAdd('cid:' + topicData.cid + ':tids:posts', topicData.postcount, tid, next);
+							var groups = data.groups;
+							var users = data.users;
+
+							async.waterfall([
+								function (next) {
+									async.eachSeries(groups, function (group, next) {
+										if (group.privileges['groups:read']) {
+											return groupsAPI.join('cid:' + cid + ':privileges:groups:topics:read', group.name, function (err) {
+												if (!err) {
+													winston.info('cid:' + cid + ':privileges:groups:topics:read granted to gid: ' + group.name);
+												}
+
+												return next(err);
+											});
+										}
+
+										next(null);
+									}, next);
+								},
+								function (next) {
+									async.eachSeries(users, function (user, next) {
+										if (user.privileges.read) {
+											return groupsAPI.join('cid:' + cid + ':privileges:topics:read', user.uid, function (err) {
+												if (!err) {
+													winston.info('cid:' + cid + ':privileges:topics:read granted to uid: ' + user.uid);
+												}
+
+												return next(err);
+											});
+										}
+
+										next(null);
+									}, next);
+								}
+							], function (err) {
+								if (!err) {
+									winston.info('-- cid ' + cid + ' upgraded');
+								}
+
+								next(err);
+							});
+						});
+					}, function (err) {
+						if (err) {
+							return next(err);
+						}
+
+						winston.info('[2016/05/28] Giving topics:read privs to any group that was previously allowed to Find & Access Category - done');
+						Upgrade.update(thisSchemaDate, next);
+					});
+				});
+			} else {
+				winston.info('[2016/05/28] Giving topics:read privs to any group that was previously allowed to Find & Access Category - skipped!');
+				next();
+			}
+		},
+		function (next) {
+			thisSchemaDate = Date.UTC(2016, 5, 13);
+
+			if (schemaDate < thisSchemaDate) {
+				updatesMade = true;
+				winston.info('[2016/06/13] Store upvotes/downvotes separately');
+
+				var batch = require('./batch');
+				var posts = require('./posts');
+				var count = 0;
+				batch.processSortedSet('posts:pid', function (pids, next) {
+					winston.info('upgraded ' + count + ' posts');
+					count += pids.length;
+					async.each(pids, function (pid, next) {
+						async.parallel({
+							upvotes: function (next) {
+								db.setCount('pid:' + pid + ':upvote', next);
+							},
+							downvotes: function (next) {
+								db.setCount('pid:' + pid + ':downvote', next);
+							}
+						}, function (err, results) {
+							if (err) {
+								return next(err);
+							}
+							var data = {};
+
+							if (parseInt(results.upvotes, 10) > 0) {
+								data.upvotes = results.upvotes;
+							}
+							if (parseInt(results.downvotes, 10) > 0) {
+								data.downvotes = results.downvotes;
+							}
+
+							if (Object.keys(data).length) {
+								posts.setPostFields(pid, data, next);
 							} else {
 								next();
 							}
-						});
-					}, function(err) {
-						if (err) {
-							winston.error('[2015/01/08] Error encountered while Updating category topics sorted sets');
-							return next(err);
-						}
-						winston.info('[2015/01/08] Updating category topics sorted sets done');
-						Upgrade.update(thisSchemaDate, next);
-					});
-				});
-			} else {
-				winston.info('[2015/01/08] Updating category topics sorted sets skipped');
-				next();
-			}
-		},
-		function(next) {
-			thisSchemaDate = Date.UTC(2015, 0, 9);
-			if (schemaDate < thisSchemaDate) {
-				updatesMade = true;
-				winston.info('[2015/01/09] Creating fullname:uid hash');
-
-				db.getSortedSetRange('users:joindate', 0, -1, function(err, uids) {
+						}, next);
+					}, next);
+				}, {}, function (err) {
 					if (err) {
-						winston.error('[2014/01/09] Error encountered while Creating fullname:uid hash');
 						return next(err);
 					}
 
-					var now = Date.now();
-
-					async.eachLimit(uids, 50, function(uid, next) {
-						db.getObjectFields('user:' + uid, ['fullname'], function(err, userData) {
-							if (err || !userData || !userData.fullname) {
-								return next(err);
-							}
-
-							db.setObjectField('fullname:uid', userData.fullname, uid, next);
-						});
-					}, function(err) {
-						if (err) {
-							winston.error('[2015/01/09] Error encountered while Creating fullname:uid hash');
-							return next(err);
-						}
-						winston.info('[2015/01/09] Creating fullname:uid hash done');
-						Upgrade.update(thisSchemaDate, next);
-					});
+					winston.info('[2016/06/13] Store upvotes/downvotes separately done');
+					Upgrade.update(thisSchemaDate, next);
 				});
 			} else {
-				winston.info('[2015/01/09] Creating fullname:uid hash skipped');
+				winston.info('[2016/06/13] Store upvotes/downvotes separately skipped!');
 				next();
 			}
 		},
-		function(next) {
-			thisSchemaDate = Date.UTC(2015, 0, 13);
+		function (next) {
+			thisSchemaDate = Date.UTC(2016, 6, 12);
+
 			if (schemaDate < thisSchemaDate) {
 				updatesMade = true;
-				winston.info('[2015/01/13] Creating uid:followed_tids sorted set');
+				winston.info('[2016/07/12] Giving upload privileges');
+				var privilegesAPI = require('./privileges');
+				var meta = require('./meta');
 
-				db.getSortedSetRange('topics:tid', 0, -1, function(err, tids) {
+				db.getSortedSetRange('categories:cid', 0, -1, function (err, cids) {
 					if (err) {
-						winston.error('[2014/01/13] Error encountered while Creating uid:followed_tids sorted set');
 						return next(err);
 					}
 
-					var now = Date.now();
-
-					async.eachLimit(tids, 50, function(tid, next) {
-						db.getSetMembers('tid:' + tid + ':followers', function(err, uids) {
+					async.eachSeries(cids, function (cid, next) {
+						privilegesAPI.categories.list(cid, function (err, data) {
 							if (err) {
 								return next(err);
 							}
-
-							async.eachLimit(uids, 50, function(uid, next) {
-								if (parseInt(uid, 10)) {
-									db.sortedSetAdd('uid:' + uid + ':followed_tids', now, tid, next);
+							async.eachSeries(data.groups, function (group, next) {
+								if (group.name === 'guests' && parseInt(meta.config.allowGuestUploads, 10) !== 1) {
+									return next();
+								}
+								if (group.privileges['groups:read']) {
+									privilegesAPI.categories.give(['upload:post:image'], cid, group.name, next);
 								} else {
 									next();
 								}
 							}, next);
 						});
-					}, function(err) {
+					}, function (err) {
 						if (err) {
-							winston.error('[2015/01/13] Error encountered while Creating uid:followed_tids sorted set');
 							return next(err);
 						}
-						winston.info('[2015/01/13] Creating uid:followed_tids sorted set done');
+
+						winston.info('[2016/07/12] Upload privileges done');
 						Upgrade.update(thisSchemaDate, next);
 					});
 				});
 			} else {
-				winston.info('[2015/01/13] Creating uid:followed_tids sorted set skipped');
+				winston.info('[2016/07/12] Upload privileges skipped!');
 				next();
 			}
 		},
-		function(next) {
-			thisSchemaDate = Date.UTC(2015, 0, 14);
+		function (next) {
+			thisSchemaDate = Date.UTC(2016, 7, 5);
+
 			if (schemaDate < thisSchemaDate) {
 				updatesMade = true;
-				winston.info('[2015/01/14] Upgrading follow sets to sorted sets');
-
-				db.getSortedSetRange('users:joindate', 0, -1, function(err, uids) {
+				winston.info('[2016/08/05] Removing best posts with negative scores');
+				var batch = require('./batch');
+				batch.processSortedSet('users:joindate', function (ids, next) {
+					async.each(ids, function (id, next) {
+						console.log('processing uid ' + id);
+						db.sortedSetsRemoveRangeByScore(['uid:' + id + ':posts:votes'], '-inf', 0, next);
+					}, next);
+				}, {}, function (err) {
 					if (err) {
-						winston.error('[2014/01/14] Error encountered while Upgrading follow sets to sorted sets');
+						return next(err);
+					}
+					winston.info('[2016/08/05] Removing best posts with negative scores done!');
+					Upgrade.update(thisSchemaDate, next);
+				});
+
+			} else {
+				winston.info('[2016/08/05] Removing best posts with negative scores skipped!');
+				next();
+			}
+		},
+		function (next) {
+			thisSchemaDate = Date.UTC(2016, 8, 7);
+
+			if (schemaDate < thisSchemaDate) {
+				updatesMade = true;
+				winston.info('[2016/08/07] Granting edit/delete/delete topic on existing categories');
+
+				var groupsAPI = require('./groups');
+				var privilegesAPI = require('./privileges');
+
+				db.getSortedSetRange('categories:cid', 0, -1, function (err, cids) {
+					if (err) {
 						return next(err);
 					}
 
-					var now = Date.now();
-
-					async.eachLimit(uids, 50, function(uid, next) {
-						async.parallel({
-							following: function(next) {
-								db.getSetMembers('following:' + uid, next);
-							},
-							followers: function(next) {
-								db.getSetMembers('followers:' + uid, next);
-							}
-						}, function(err, results) {
-							function updateToSortedSet(set, uids, callback) {
-								async.eachLimit(uids, 50, function(uid, next) {
-									if (parseInt(uid, 10)) {
-										db.sortedSetAdd(set, now, uid, next);
-									} else {
-										next();
-									}
-								}, callback);
-							}
+					async.eachSeries(cids, function (cid, next) {
+						privilegesAPI.categories.list(cid, function (err, data) {
 							if (err) {
 								return next(err);
 							}
 
-							async.parallel([
-								async.apply(db.delete, 'following:' + uid),
-								async.apply(db.delete, 'followers:' + uid)
-							], function(err) {
-								if (err) {
+							var groups = data.groups;
+							var users = data.users;
+
+							async.waterfall([
+								function (next) {
+									async.eachSeries(groups, function (group, next) {
+										if (group.privileges['groups:topics:reply']) {
+											return async.parallel([
+												async.apply(groupsAPI.join, 'cid:' + cid + ':privileges:groups:posts:edit', group.name),
+												async.apply(groupsAPI.join, 'cid:' + cid + ':privileges:groups:posts:delete', group.name)
+											], function (err) {
+												if (!err) {
+													winston.info('cid:' + cid + ':privileges:groups:posts:edit, cid:' + cid + ':privileges:groups:posts:delete granted to gid: ' + group.name);
+												}
+
+												return next(err);
+											});
+										}
+
+										next(null);
+									}, next);
+								},
+								function (next) {
+									async.eachSeries(groups, function (group, next) {
+										if (group.privileges['groups:topics:create']) {
+											return groupsAPI.join('cid:' + cid + ':privileges:groups:topics:delete', group.name, function (err) {
+												if (!err) {
+													winston.info('cid:' + cid + ':privileges:groups:topics:delete granted to gid: ' + group.name);
+												}
+
+												return next(err);
+											});
+										}
+
+										next(null);
+									}, next);
+								},
+								function (next) {
+									async.eachSeries(users, function (user, next) {
+										if (user.privileges['topics:reply']) {
+											return async.parallel([
+												async.apply(groupsAPI.join, 'cid:' + cid + ':privileges:posts:edit', user.uid),
+												async.apply(groupsAPI.join, 'cid:' + cid + ':privileges:posts:delete', user.uid)
+											], function (err) {
+												if (!err) {
+													winston.info('cid:' + cid + ':privileges:posts:edit, cid:' + cid + ':privileges:posts:delete granted to uid: ' + user.uid);
+												}
+
+												return next(err);
+											});
+										}
+
+										next(null);
+									}, next);
+								},
+								function (next) {
+									async.eachSeries(users, function (user, next) {
+										if (user.privileges['topics:create']) {
+											return groupsAPI.join('cid:' + cid + ':privileges:topics:delete', user.uid, function (err) {
+												if (!err) {
+													winston.info('cid:' + cid + ':privileges:topics:delete granted to uid: ' + user.uid);
+												}
+
+												return next(err);
+											});
+										}
+
+										next(null);
+									}, next);
+								}
+							], function (err) {
+								if (!err) {
+									winston.info('-- cid ' + cid + ' upgraded');
+								}
+
+								next(err);
+							});
+						});
+					}, function (err) {
+						if (err) {
+							return next(err);
+						}
+
+						winston.info('[2016/08/07] Granting edit/delete/delete topic on existing categories - done');
+						Upgrade.update(thisSchemaDate, next);
+					});
+				});
+			} else {
+				winston.info('[2016/08/07] Granting edit/delete/delete topic on existing categories - skipped!');
+				next();
+			}
+		},
+		function (next) {
+			thisSchemaDate = Date.UTC(2016, 8, 22);
+
+			if (schemaDate < thisSchemaDate) {
+				updatesMade = true;
+				winston.info('[2016/09/22] Setting category recent tids');
+
+
+				db.getSortedSetRange('categories:cid', 0, -1, function (err, cids) {
+					if (err) {
+						return next(err);
+					}
+
+					async.eachSeries(cids, function (cid, next) {
+						db.getSortedSetRevRange('cid:' + cid + ':pids', 0, 0, function (err, pid) {
+							if (err || !pid) {
+								return next(err);
+							}
+							db.getObjectFields('post:' + pid, ['tid', 'timestamp'], function (err, postData) {
+								if (err || !postData || !postData.tid) {
 									return next(err);
 								}
-								async.parallel([
-									async.apply(updateToSortedSet, 'following:' + uid, results.following),
-									async.apply(updateToSortedSet, 'followers:' + uid, results.followers),
-									async.apply(db.setObjectField, 'user:' + uid, 'followingCount', results.following.length),
-									async.apply(db.setObjectField, 'user:' + uid, 'followerCount', results.followers.length),
-								], next);
+								db.sortedSetAdd('cid:' + cid + ':recent_tids', postData.timestamp, postData.tid, next);
 							});
 						});
-					}, function(err) {
+					}, function (err) {
 						if (err) {
-							winston.error('[2015/01/14] Error encountered while Upgrading follow sets to sorted sets');
 							return next(err);
 						}
-						winston.info('[2015/01/14] Upgrading follow sets to sorted sets done');
+
+						winston.info('[2016/09/22] Setting category recent tids - done');
 						Upgrade.update(thisSchemaDate, next);
 					});
 				});
 			} else {
-				winston.info('[2015/01/14] Upgrading follow sets to sorted sets skipped');
+				winston.info('[2016/09/22] Setting category recent tids - skipped!');
 				next();
 			}
 		},
-		function(next) {
-			thisSchemaDate = Date.UTC(2015, 0, 15);
-			if (schemaDate < thisSchemaDate) {
-				updatesMade = true;
-				winston.info('[2015/01/15] Creating topiccount for users');
+		function (next) {
+			function upgradePosts(next) {
+				var batch = require('./batch');
 
-				db.getSortedSetRange('users:joindate', 0, -1, function(err, uids) {
-					if (err) {
-						winston.error('[2015/01/15] Error encountered while Creating topiccount for users');
-						return next(err);
-					}
-
-					async.eachLimit(uids, 50, function(uid, next) {
-						db.sortedSetCard('uid:' + uid + ':topics', function(err, count) {
-							if (err) {
-								return next(err);
+				batch.processSortedSet('posts:pid', function (ids, next) {
+					async.each(ids, function (id, next) {
+						console.log('processing pid ' + id);
+						async.waterfall([
+							function (next) {
+								db.rename('pid:' + id + ':users_favourited', 'pid:' + id + ':users_bookmarked', next);
+							},
+							function (next) {
+								db.getObjectField('post:' + id, 'reputation', next);
+							},
+							function (reputation, next) {
+								if (parseInt(reputation, 10)) {
+									db.setObjectField('post:' + id, 'bookmarks', reputation, next);
+								} else {
+									next();
+								}
+							},
+							function (next) {
+								db.deleteObjectField('post:' + id, 'reputation', next);
 							}
-
-							if (parseInt(count, 10)) {
-								db.setObjectField('user:' + uid, 'topiccount', count, next);
-							} else {
-								next();
-							}
-						});
-					}, function(err) {
-						if (err) {
-							winston.error('[2015/01/15] Error encountered while Creating topiccount for users');
-							return next(err);
-						}
-						winston.info('[2015/01/15] Creating topiccount for users done');
-						Upgrade.update(thisSchemaDate, next);
-					});
-				});
-			} else {
-				winston.info('[2015/01/15] Creating topiccount for users skipped');
-				next();
+						], next);
+					}, next);
+				}, {}, next);
 			}
-		},
-		function(next) {
-			thisSchemaDate = Date.UTC(2015, 0, 19);
+
+			function upgradeUsers(next) {
+				var batch = require('./batch');
+
+				batch.processSortedSet('users:joindate', function (ids, next) {
+					async.each(ids, function (id, next) {
+						console.log('processing uid ' + id);
+						db.rename('uid:' + id + ':favourites', 'uid:' + id + ':bookmarks', next);
+					}, next);
+				}, {}, next);
+			}
+
+			thisSchemaDate = Date.UTC(2016, 9, 8);
+
 			if (schemaDate < thisSchemaDate) {
 				updatesMade = true;
-				winston.info('[2015/01/19] Generating group slugs');
-
-				async.waterfall([
-					async.apply(db.getSetMembers, 'groups'),
-					function(groups, next) {
-						async.filter(groups, function(groupName, next) {
-							db.getObjectField('group:' + groupName, 'hidden', function(err, hidden) {
-								next((err || parseInt(hidden, 10)) ? false : true);
-							});
-						}, function(groups) {
-							next(null, groups);
-						});
-					}
-				], function(err, groups) {
-					var tasks = [];
-					groups.forEach(function(groupName) {
-						tasks.push(async.apply(db.setObjectField, 'group:' + groupName, 'slug', Utils.slugify(groupName)));
-						tasks.push(async.apply(db.setObjectField, 'groupslug:groupname', Utils.slugify(groupName), groupName));
-					});
-
-					// Administrator group
-					tasks.push(async.apply(db.setObjectField, 'group:administrators', 'slug', 'administrators'));
-					tasks.push(async.apply(db.setObjectField, 'groupslug:groupname', 'administrators', 'administrators'));
-
-					async.parallel(tasks, function(err) {
-						if (err) {
-							winston.error('[2015/01/19] Error encountered while Generating group slugs');
-							return next(err);
-						}
-
-						winston.info('[2015/01/19] Generating group slugs done');
-						Upgrade.update(thisSchemaDate, next);
-					});
-				});
-			} else {
-				winston.info('[2015/01/19] Generating group slugs skipped');
-				next();
-			}
-		},
-		function(next) {
-			thisSchemaDate = Date.UTC(2015, 0, 21);
-			if (schemaDate < thisSchemaDate) {
-				updatesMade = true;
-				winston.info('[2015/01/21] Upgrading groups to sorted set');
-
-				db.getSetMembers('groups', function(err, groupNames) {
+				winston.info('[2016/10/8] favourite -> bookmark refactor');
+				async.series([upgradePosts, upgradeUsers], function (err) {
 					if (err) {
 						return next(err);
 					}
+					winston.info('[2016/08/05] favourite- bookmark refactor done!');
+					Upgrade.update(thisSchemaDate, next);
+				});
+			} else {
+				winston.info('[2016/10/8] favourite -> bookmark refactor - skipped!');
+				next();
+			}
+		},
+		function (next) {
+			thisSchemaDate = Date.UTC(2016, 9, 14);
 
-					var now = Date.now();
-					async.each(groupNames, function(groupName, next) {
-						db.getSetMembers('group:' + groupName + ':members', function(err, members) {
-							if (err) {
-								return next(err);
+			if (schemaDate < thisSchemaDate) {
+				updatesMade = true;
+				winston.info('[2016/10/14] Creating sorted sets for post replies');
+
+				var posts = require('./posts');
+				var batch = require('./batch');
+				batch.processSortedSet('posts:pid', function (ids, next) {
+					posts.getPostsFields(ids, ['pid', 'toPid', 'timestamp'], function (err, data) {
+						if (err) {
+							return next(err);
+						}
+
+						async.eachSeries(data, function (postData, next) {
+							if (!parseInt(postData.toPid, 10)) {
+								return next(null);
 							}
-
-							async.series([
-								function(next) {
-									if (members && members.length) {
-										db.delete('group:' + groupName + ':members', function(err) {
-											if (err) {
-												return next(err);
-											}
-											var scores = members.map(function() {
-												return now;
-											});
-											db.sortedSetAdd('group:' + groupName + ':members', scores, members, next);
-										});
-									} else {
-										next();
-									}
-								},
-								async.apply(db.sortedSetAdd, 'groups:createtime', now, groupName),
-								async.apply(db.setObjectField, 'group:' + groupName, 'createtime', now)
+							console.log('processing pid: ' + postData.pid + ' toPid: ' + postData.toPid);
+							async.parallel([
+								async.apply(db.sortedSetAdd, 'pid:' + postData.toPid + ':replies', postData.timestamp, postData.pid),
+								async.apply(db.incrObjectField, 'post:' + postData.toPid, 'replies')
 							], next);
-						});
-
-					}, function(err) {
-						winston.info('[2015/01/21] Upgrading groups to sorted set done');
-						Upgrade.update(thisSchemaDate, next);
+						}, next);
 					});
-				});
-			} else {
-				winston.info('[2015/01/21] Upgrading groups to sorted set skipped');
-				next();
-			}
-		},
-		function(next) {
-			thisSchemaDate = Date.UTC(2015, 0, 30);
-			if (schemaDate < thisSchemaDate) {
-				updatesMade = true;
-				winston.info('[2015/01/30] Adding group member counts');
-
-				db.getSortedSetRange('groups:createtime', 0, -1, function(err, groupNames) {
+				}, function (err) {
 					if (err) {
 						return next(err);
 					}
 
-					var now = Date.now();
-					async.each(groupNames, function(groupName, next) {
-						db.sortedSetCard('group:' + groupName + ':members', function(err, memberCount) {
-							if (err) {
-								return next(err);
-							}
-
-							if (parseInt(memberCount, 10)) {
-								db.setObjectField('group:' + groupName, 'memberCount', memberCount, next);
-							} else {
-								next();
-							}
-						});
-					}, function(err) {
-						winston.info('[2015/01/30] Adding group member counts done');
-						Upgrade.update(thisSchemaDate, next);
-					});
-				});
-			} else {
-				winston.info('[2015/01/30] Adding group member counts skipped');
-				next();
-			}
-		},
-		function(next) {
-			thisSchemaDate = Date.UTC(2015, 1, 8);
-			if (schemaDate < thisSchemaDate) {
-				updatesMade = true;
-				winston.info('[2015/02/08] Clearing reset tokens');
-
-				db.deleteAll(['reset:expiry', 'reset:uid'], function(err) {
-					if (err) {
-						winston.error('[2015/02/08] Error encountered while Clearing reset tokens');
-						return next(err);
-					}
-
-					winston.info('[2015/02/08] Clearing reset tokens done');
+					winston.info('[2016/10/14] Creating sorted sets for post replies - done');
 					Upgrade.update(thisSchemaDate, next);
 				});
 			} else {
-				winston.info('[2015/02/08] Clearing reset tokens skipped');
-				next();
-			}
-		},
-		function(next) {
-			thisSchemaDate = Date.UTC(2015, 1, 17);
-			if (schemaDate < thisSchemaDate) {
-				updatesMade = true;
-				winston.info('[2015/02/17] renaming home.tpl to categories.tpl');
-
-				db.rename('widgets:home.tpl', 'widgets:categories.tpl', function(err) {
-					if (err) {
-						return next(err);
-					}
-
-					winston.info('[2015/02/17] renaming home.tpl to categories.tpl done');
-					Upgrade.update(thisSchemaDate, next);
-				});
-			} else {
-				winston.info('[2015/02/17] renaming home.tpl to categories.tpl skipped');
-				next();
-			}
-		},
-		function(next) {
-			thisSchemaDate = Date.UTC(2015, 1, 23);
-			if (schemaDate < thisSchemaDate) {
-				db.setAdd('plugins:active', 'nodebb-rewards-essentials', function(err) {
-					winston.info('[2015/2/23] Activating NodeBB Essential Rewards');
-					Plugins.reload(function() {
-						if (err) {
-							next(err);
-						} else {
-							Upgrade.update(thisSchemaDate, next);
-						}
-					});
-				});
-			} else {
-				winston.info('[2015/2/23] Activating NodeBB Essential Rewards - skipped');
-				next();
-			}
-		},
-		function(next) {
-			thisSchemaDate = Date.UTC(2015, 1, 24);
-			if (schemaDate < thisSchemaDate) {
-				updatesMade = true;
-				winston.info('[2015/02/24] Upgrading plugins:active to sorted set');
-
-				db.getSetMembers('plugins:active', function(err, activePlugins) {
-					if (err) {
-						return next(err);
-					}
-					if (!Array.isArray(activePlugins) || !activePlugins.length) {
-						winston.info('[2015/02/24] Upgrading plugins:active to sorted set done');
-						Upgrade.update(thisSchemaDate, next);
-					}
-
-					db.delete('plugins:active', function(err) {
-						if (err) {
-							return next(err);
-						}
-						var order = -1;
-						async.eachSeries(activePlugins, function(plugin, next) {
-							++order;
-							db.sortedSetAdd('plugins:active', order, plugin, next);
-						}, function(err) {
-							if (err) {
-								return next(err);
-							}
-							winston.info('[2015/02/24] Upgrading plugins:active to sorted set done');
-							Upgrade.update(thisSchemaDate, next);
-						});
-					});
-				});
-			} else {
-				winston.info('[2015/02/24] Upgrading plugins:active to sorted set skipped');
-				next();
-			}
-		},
-		function(next) {
-			thisSchemaDate = Date.UTC(2015, 1, 24, 1);
-			if (schemaDate < thisSchemaDate) {
-				updatesMade = true;
-				winston.info('[2015/02/24] Upgrading privilege groups to system groups');
-
-				var isPrivilegeGroup = /^cid:\d+:privileges:[\w:]+$/;
-				db.getSortedSetRange('groups:createtime', 0, -1, function (err, groupNames) {
-					groupNames = groupNames.filter(function(name) {
-						return isPrivilegeGroup.test(name);
-					});
-
-					async.eachLimit(groupNames, 5, function(groupName, next) {
-						db.setObjectField('group:' + groupName, 'system', '1', next);
-					}, function(err) {
-						if (err) {
-							return next(err);
-						}
-						winston.info('[2015/02/24] Upgrading privilege groups to system groups done');
-						Upgrade.update(thisSchemaDate, next);
-					})
-				});
-			} else {
-				winston.info('[2015/02/24] Upgrading privilege groups to system groups skipped');
-				next();
-			}
-		},
-		function(next) {
-			thisSchemaDate = Date.UTC(2015, 1, 25, 6);
-			if (schemaDate < thisSchemaDate) {
-				updatesMade = true;
-				winston.info('[2015/02/25] Upgrading menu items to dynamic navigation system');
-
-				require('./navigation/admin').save(require('../install/data/navigation.json'), function(err) {
-					if (err) {
-						return next(err);
-					}
-
-					winston.info('[2015/02/25] Upgrading menu items to dynamic navigation system done');
-					Upgrade.update(thisSchemaDate, next);
-				});
-			} else {
-				winston.info('[2015/02/25] Upgrading menu items to dynamic navigation system skipped');
+				winston.info('[2016/10/14] Creating sorted sets for post replies - skipped!');
 				next();
 			}
 		}
-
 		// Add new schema updates here
 		// IMPORTANT: REMEMBER TO UPDATE VALUE OF latestSchema IN LINE 24!!!
-	], function(err) {
+	], function (err) {
 		if (!err) {
 			if(updatesMade) {
 				winston.info('[upgrade] Schema update complete!');
 			} else {
 				winston.info('[upgrade] Schema already up to date!');
 			}
-
-			process.exit();
 		} else {
 			switch(err.message) {
 			case 'upgrade-not-possible':
 				winston.error('[upgrade] NodeBB upgrade could not complete, as your database schema is too far out of date.');
 				winston.error('[upgrade]   Please ensure that you did not skip any minor version upgrades.');
 				winston.error('[upgrade]   (e.g. v0.1.x directly to v0.3.x)');
-				process.exit();
 				break;
 
 			default:
 				winston.error('[upgrade] Errors were encountered while updating the NodeBB schema: ' + err.message);
-				process.exit();
 				break;
 			}
+		}
+
+		if (typeof callback === 'function') {
+			callback(err);
+		} else {
+			process.exit();
 		}
 	});
 };

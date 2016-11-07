@@ -2,67 +2,103 @@
 
 /* globals define, app, socket, templates */
 
-define('forum/topic/move', function() {
+define('forum/topic/move', function () {
 
 	var Move = {},
 		modal,
-		targetCid,
-		targetCategoryLabel;
+		selectedEl;
 
-	Move.init = function(tids, currentCid, onComplete) {
-		modal = $('#move_thread_modal');
-
+	Move.init = function (tids, currentCid, onComplete) {
 		Move.tids = tids;
 		Move.currentCid = currentCid;
 		Move.onComplete = onComplete;
 		Move.moveAll = tids ? false : true;
 
-		modal.on('shown.bs.modal', onMoveModalShown);
-		$('#move-confirm').hide();
-
-		if (Move.moveAll || (tids && tids.length > 1)) {
-			modal.find('.modal-header h3').translateText('[[topic:move_topics]]');
-		}
-
-		modal.modal('show');
+		socket.emit('categories.getMoveCategories', onCategoriesLoaded);
 	};
-
-	function onMoveModalShown() {
-		var loadingEl = $('#categories-loading');
-		if (!loadingEl.length) {
-			return;
-		}
-
-		socket.emit('categories.get', onCategoriesLoaded);
-	}
 
 	function onCategoriesLoaded(err, categories) {
 		if (err) {
 			return app.alertError(err.message);
 		}
 
-		renderCategories(categories);
+		parseModal(categories, function () {
 
-		modal.on('click', '.category-list li[data-cid]', function(e) {
-			selectCategory($(this));
+			modal.on('hidden.bs.modal', function () {
+				modal.remove();
+			});
+
+			modal.find('#move-confirm').addClass('hide');
+
+			if (Move.moveAll || (Move.tids && Move.tids.length > 1)) {
+				modal.find('.modal-header h3').translateText('[[topic:move_topics]]');
+			}
+
+			modal.on('click', '.category-list li[data-cid]', function () {
+				selectCategory($(this));
+			});
+
+			modal.find('#move_thread_commit').on('click', onCommitClicked);
+
+			modal.modal('show');
 		});
+	}
 
-		$('#move_thread_commit').on('click', onCommitClicked);
+	function parseModal(categories, callback) {
+		templates.parse('partials/move_thread_modal', {categories: []}, function (html) {
+			require(['translator'], function (translator) {
+				translator.translate(html, function (html) {
+					modal = $(html);
+					categories.forEach(function (category) {
+						if (!category.link) {
+							buildRecursive(modal.find('.category-list'), category, '');
+						}
+					});
+					callback();
+				});
+			});
+		});
+	}
+
+	function buildRecursive(parentEl, category, level) {
+		var categoryEl = $('<li/>');
+
+		if (category.bgColor) {
+			categoryEl.css('background-color', category.bgColor);
+		}
+		if (category.color) {
+			categoryEl.css('color', category.color);
+		}
+		categoryEl.toggleClass('disabled', !!category.disabled);
+		categoryEl.attr('data-cid', category.cid);
+		categoryEl.attr('data-icon', category.icon);
+		categoryEl.attr('data-name', category.name);
+		categoryEl.html('<i class="fa fa-fw ' + category.icon + '"></i> ' + category.name);
+
+		parentEl.append(level);
+		parentEl.append(categoryEl);
+		parentEl.append('<br/>');
+
+		var indent = '&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;';
+		category.children.forEach(function (childCategory) {
+			if (!childCategory.link) {
+				buildRecursive(parentEl, childCategory, indent + level);
+			}
+		});
 	}
 
 	function selectCategory(category) {
 		modal.find('#confirm-category-name').html(category.html());
-		$('#move-confirm').show();
+		modal.find('#move-confirm').removeClass('hide');
 
-		targetCid = category.attr('data-cid');
-		targetCategoryLabel = category.html();
-		$('#move_thread_commit').prop('disabled', false);
+		selectedEl = category;
+		modal.find('#move_thread_commit').prop('disabled', false);
 	}
 
 	function onCommitClicked() {
-		var commitEl = $('#move_thread_commit');
+		var commitEl = modal.find('#move_thread_commit');
 
-		if (!commitEl.prop('disabled') && targetCid) {
+		if (!commitEl.prop('disabled') && selectedEl.attr('data-cid')) {
 			commitEl.prop('disabled', true);
 
 			moveTopics();
@@ -72,29 +108,22 @@ define('forum/topic/move', function() {
 	function moveTopics() {
 		socket.emit(Move.moveAll ? 'topics.moveAll' : 'topics.move', {
 			tids: Move.tids,
-			cid: targetCid,
+			cid: selectedEl.attr('data-cid'),
 			currentCid: Move.currentCid
-		}, function(err) {
+		}, function (err) {
 			modal.modal('hide');
-			$('#move_thread_commit').prop('disabled', false);
 
-			if(err) {
+			if (err) {
 				return app.alertError(err.message);
 			}
 
-			app.alertSuccess('[[topic:topic_move_success, ' + targetCategoryLabel + ']]');
+			app.alertSuccess('[[topic:topic_move_success, ' + selectedEl.attr('data-name') + ']] <i class="fa fa-fw ' + selectedEl.attr('data-icon') + '"></i>');
 			if (typeof Move.onComplete === 'function') {
 				Move.onComplete();
 			}
 		});
 	}
 
-	function renderCategories(categories) {
-		templates.parse('partials/category_list', {categories: categories}, function(html) {
-			modal.find('.modal-body').prepend(html);
-			$('#categories-loading').remove();
-		});
-	}
 
 	return Move;
 });

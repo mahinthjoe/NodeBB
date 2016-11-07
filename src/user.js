@@ -1,26 +1,29 @@
 'use strict';
 
-var	async = require('async'),
-	nconf = require('nconf'),
-	gravatar = require('gravatar'),
+var	async = require('async');
+var _ = require('underscore');
 
-	plugins = require('./plugins'),
-	db = require('./database'),
-	meta = require('./meta'),
-	topics = require('./topics'),
-	groups = require('./groups'),
-	Password = require('./password');
+var groups = require('./groups');
+var plugins = require('./plugins');
+var db = require('./database');
+var topics = require('./topics');
+var privileges = require('./privileges');
+var meta = require('./meta');
 
-(function(User) {
+(function (User) {
 
 	User.email = require('./user/email');
 	User.notifications = require('./user/notifications');
 	User.reset = require('./user/reset');
 	User.digest = require('./user/digest');
 
+	require('./user/data')(User);
 	require('./user/auth')(User);
+	require('./user/bans')(User);
 	require('./user/create')(User);
 	require('./user/posts')(User);
+	require('./user/topics')(User);
+	require('./user/categories')(User);
 	require('./user/follow')(User);
 	require('./user/profile')(User);
 	require('./user/admin')(User);
@@ -28,139 +31,38 @@ var	async = require('async'),
 	require('./user/settings')(User);
 	require('./user/search')(User);
 	require('./user/jobs')(User);
+	require('./user/picture')(User);
+	require('./user/approval')(User);
+	require('./user/invite')(User);
+	require('./user/password')(User);
+	require('./user/info')(User);
 
-	User.getUserField = function(uid, field, callback) {
-		User.getUserFields(uid, [field], function(err, user) {
-			callback(err, user ? user[field] : null);
-		});
-	};
-
-	User.getUserFields = function(uid, fields, callback) {
-		User.getMultipleUserFields([uid], fields, function(err, users) {
-			callback(err, users ? users[0] : null);
-		});
-	};
-
-	User.getMultipleUserFields = function(uids, fields, callback) {
-		var fieldsToRemove = [];
-		function addField(field) {
-			if (fields.indexOf(field) === -1) {
-				fields.push(field);
-				fieldsToRemove.push(field);
-			}
-		}
-
-		if (!Array.isArray(uids) || !uids.length) {
-			return callback(null, []);
-		}
-
-		var keys = uids.map(function(uid) {
-			return 'user:' + uid;
-		});
-
-		if (fields.indexOf('uid') === -1) {
-			fields.push('uid');
-		}
-
-		if (fields.indexOf('picture') !== -1) {
-			addField('email');
-			addField('gravatarpicture');
-			addField('uploadedpicture');
-		}
-
-		db.getObjectsFields(keys, fields, function(err, users) {
-			if (err) {
-				return callback(err);
-			}
-
-			modifyUserData(users, fieldsToRemove, callback);
-		});
-	};
-
-	User.getUserData = function(uid, callback) {
-		User.getUsersData([uid], function(err, users) {
-			callback(err, users ? users[0] : null);
-		});
-	};
-
-	User.getUsersData = function(uids, callback) {
-		if (!Array.isArray(uids) || !uids.length) {
-			return callback(null, []);
-		}
-
-		var keys = uids.map(function(uid) {
-			return 'user:' + uid;
-		});
-
-		db.getObjects(keys, function(err, users) {
-			if (err) {
-				return callback(err);
-			}
-
-			modifyUserData(users, [], callback);
-		});
-	};
-
-	function modifyUserData(users, fieldsToRemove, callback) {
-		users.forEach(function(user) {
-			if (!user) {
-				return;
-			}
-
-			if (user.password) {
-				user.password = undefined;
-			}
-
-			if (!parseInt(user.uid, 10)) {
-				user.uid = 0;
-				user.username = '[[global:guest]]';
-				user.userslug = '';
-				user.picture = User.createGravatarURLFromEmail('');
-			}
-
-			if (user.picture) {
-				if (user.picture === user.uploadedpicture) {
-					user.picture = user.uploadedpicture = user.picture.indexOf('http') === -1 ? nconf.get('relative_path') + user.picture : user.picture;
-				} else {
-					user.picture = User.createGravatarURLFromEmail(user.email);
-				}
-			}
-
-			for(var i=0; i<fieldsToRemove.length; ++i) {
-				user[fieldsToRemove[i]] = undefined;
-			}
-		});
-
-		plugins.fireHook('filter:users.get', users, callback);
-	}
-
-	User.updateLastOnlineTime = function(uid, callback) {
-		callback = callback || function() {};
-		User.getUserFields(uid, ['status', 'lastonline'], function(err, userData) {
+	User.updateLastOnlineTime = function (uid, callback) {
+		callback = callback || function () {};
+		db.getObjectFields('user:' + uid, ['status', 'lastonline'], function (err, userData) {
 			var now = Date.now();
 			if (err || userData.status === 'offline' || now - parseInt(userData.lastonline, 10) < 300000) {
 				return callback(err);
 			}
-
 			User.setUserField(uid, 'lastonline', now, callback);
 		});
 	};
 
-	User.updateOnlineUsers = function(uid, callback) {
-		callback = callback || function() {};
+	User.updateOnlineUsers = function (uid, callback) {
+		callback = callback || function () {};
 
 		var now = Date.now();
 		async.waterfall([
-			function(next) {
+			function (next) {
 				db.sortedSetScore('users:online', uid, next);
 			},
-			function(userOnlineTime, next) {
+			function (userOnlineTime, next) {
 				if (now - parseInt(userOnlineTime, 10) < 300000) {
 					return callback();
 				}
-				db.sortedSetAdd('users:online', now, uid, next);	
+				db.sortedSetAdd('users:online', now, uid, next);
 			},
-			function(next) {
+			function (next) {
 				topics.pushUnreadCount(uid);
 				plugins.fireHook('action:user.online', {uid: uid, timestamp: now});
 				next();
@@ -168,186 +70,136 @@ var	async = require('async'),
 		], callback);
 	};
 
-	User.setUserField = function(uid, field, value, callback) {
-		callback = callback || function() {};
-		db.setObjectField('user:' + uid, field, value, function(err) {
-			if (err) {
-				return callback(err);
-			}
-			plugins.fireHook('action:user.set', {uid: uid, field: field, value: value, type: 'set'});
-			callback();
-		});
-	};
-
-	User.setUserFields = function(uid, data, callback) {
-		callback = callback || function() {};
-		db.setObject('user:' + uid, data, function(err) {
-			if (err) {
-				return callback(err);
-			}
-			for (var field in data) {
-				if (data.hasOwnProperty(field)) {
-					plugins.fireHook('action:user.set', {uid: uid, field: field, value: data[field], type: 'set'});
-				}
-			}
-			callback();
-		});
-	};
-
-	User.incrementUserFieldBy = function(uid, field, value, callback) {
-		callback = callback || function() {};
-		db.incrObjectFieldBy('user:' + uid, field, value, function(err, value) {
-			if (err) {
-				return callback(err);
-			}
-			plugins.fireHook('action:user.set', {uid: uid, field: field, value: value, type: 'increment'});
-
-			callback(null, value);
-		});
-	};
-
-	User.decrementUserFieldBy = function(uid, field, value, callback) {
-		callback = callback || function() {};
-		db.incrObjectFieldBy('user:' + uid, field, -value, function(err, value) {
-			if (err) {
-				return callback(err);
-			}
-			plugins.fireHook('action:user.set', {uid: uid, field: field, value: value, type: 'decrement'});
-
-			callback(null, value);
-		});
-	};
-
-	User.getUidsFromSet = function(set, start, stop, callback) {
+	User.getUidsFromSet = function (set, start, stop, callback) {
 		if (set === 'users:online') {
 			var count = parseInt(stop, 10) === -1 ? stop : stop - start + 1;
 			var now = Date.now();
-			db.getSortedSetRevRangeByScore(set, start, count, now, now - 300000, callback);
+			db.getSortedSetRevRangeByScore(set, start, count, '+inf', now - 300000, callback);
 		} else {
 			db.getSortedSetRevRange(set, start, stop, callback);
 		}
 	};
 
-	User.getUsersFromSet = function(set, uid, start, stop, callback) {
+	User.getUsersFromSet = function (set, uid, start, stop, callback) {
 		async.waterfall([
-			function(next) {
+			function (next) {
 				User.getUidsFromSet(set, start, stop, next);
 			},
-			function(uids, next) {
+			function (uids, next) {
 				User.getUsers(uids, uid, next);
 			}
 		], callback);
 	};
 
-	User.getUsers = function(uids, uid, callback) {
-		var fields = ['uid', 'username', 'userslug', 'picture', 'status', 'banned', 'postcount', 'reputation', 'email:confirmed'];
-		plugins.fireHook('filter:users.addFields', {fields: fields}, function(err, data) {
-			if (err) {
-				return callback(err);
+	User.getUsersWithFields = function (uids, fields, uid, callback) {
+		async.waterfall([
+			function (next) {
+				plugins.fireHook('filter:users.addFields', {fields: fields}, next);
+			},
+			function (data, next) {
+				data.fields = data.fields.filter(function (field, index, array) {
+					return array.indexOf(field) === index;
+				});
+
+				async.parallel({
+					userData: function (next) {
+						User.getUsersFields(uids, data.fields, next);
+					},
+					isAdmin: function (next) {
+						User.isAdministrator(uids, next);
+					}
+				}, next);
+			},
+			function (results, next) {
+				results.userData.forEach(function (user, index) {
+					if (user) {
+						user.status = User.getStatus(user);
+						user.administrator = results.isAdmin[index];
+						user.banned = parseInt(user.banned, 10) === 1;
+						user.banned_until = parseInt(user['banned:expire'], 10) || 0;
+						user.banned_until_readable = user.banned_until ? new Date(user.banned_until).toString() : 'Not Banned';
+						user['email:confirmed'] = parseInt(user['email:confirmed'], 10) === 1;
+					}
+				});
+				plugins.fireHook('filter:userlist.get', {users: results.userData, uid: uid}, next);
+			},
+			function (data, next) {
+				next(null, data.users);
 			}
-			data.fields = data.fields.filter(function(field, index, array) {
-				return array.indexOf(field) === index;
-			});
-			async.parallel({
-				userData: function(next) {
-					User.getMultipleUserFields(uids, data.fields, next);
-				},
-				isAdmin: function(next) {
-					User.isAdministrator(uids, next);
-				},
-				isOnline: function(next) {
-					require('./socket.io').isUsersOnline(uids, next);
-				}
-			}, function(err, results) {
-				if (err) {
-					return callback(err);
-				}
-
-				results.userData.forEach(function(user, index) {
-					if (!user) {
-						return;
-					}
-					user.status = User.getStatus(user.status, results.isOnline[index]);
-					user.administrator = results.isAdmin[index];
-					user.banned = parseInt(user.banned, 10) === 1;
-					user['email:confirmed'] = parseInt(user['email:confirmed'], 10) === 1;
-				});
-
-				plugins.fireHook('filter:userlist.get', {users: results.userData, uid: uid}, function(err, data) {
-					if (err) {
-						return callback(err);
-					}
-					callback(null, data.users);
-				});
-			});
-		});
-	};
-
-	User.getStatus = function(status, isOnline) {
-		return isOnline ? (status || 'online') : 'offline';
-	};
-
-	User.createGravatarURLFromEmail = function(email) {
-		var customGravatarDefaultImage = meta.config.customGravatarDefaultImage;
-		if (customGravatarDefaultImage && customGravatarDefaultImage.indexOf('http') === -1) {
-			customGravatarDefaultImage = nconf.get('url') + meta.config.customGravatarDefaultImage;
-		}
-
-		var options = {
-			size: parseInt(meta.config.profileImageDimension, 10) || 128,
-			default: customGravatarDefaultImage || meta.config.defaultGravatarImage || 'identicon',
-			rating: 'pg'
-		};
-
-		if (!email) {
-			email = '';
-		}
-
-		return gravatar.url(email, options, true);
-	};
-
-	User.hashPassword = function(password, callback) {
-		if (!password) {
-			return callback(null, password);
-		}
-
-		Password.hash(nconf.get('bcrypt_rounds') || 12, password, callback);
-	};
-
-	User.addTopicIdToUser = function(uid, tid, timestamp, callback) {
-		async.parallel([
-			async.apply(db.sortedSetAdd, 'uid:' + uid + ':topics', timestamp, tid),
-			async.apply(User.incrementUserFieldBy, uid, 'topiccount', 1)
 		], callback);
 	};
 
-	User.exists = function(userslug, callback) {
-		User.getUidByUserslug(userslug, function(err, exists) {
+	User.getUsers = function (uids, uid, callback) {
+		var fields = ['uid', 'username', 'userslug', 'picture', 'status', 'flags',
+			'banned', 'banned:expire', 'joindate', 'postcount', 'reputation', 'email:confirmed', 'lastonline'];
+
+		User.getUsersWithFields(uids, fields, uid, callback);
+	};
+
+	User.getStatus = function (userData) {
+		var isOnline = (Date.now() - parseInt(userData.lastonline, 10)) < 300000;
+		return isOnline ? (userData.status || 'online') : 'offline';
+	};
+
+	User.isOnline = function (uid, callback) {
+		if (Array.isArray(uid)) {
+			db.sortedSetScores('users:online', uid, function (err, lastonline) {
+				if (err) {
+					return callback(err);
+				}
+				var now = Date.now();
+				var isOnline = uid.map(function (uid, index) {
+					return now - lastonline[index] < 300000;
+				});
+				callback(null, isOnline);
+			});
+		} else {
+			db.sortedSetScore('users:online', uid, function (err, lastonline) {
+				if (err) {
+					return callback(err);
+				}
+				var isOnline = Date.now() - parseInt(lastonline, 10) < 300000;
+				callback(null, isOnline);
+			});
+		}
+
+	};
+
+	User.exists = function (uid, callback) {
+		db.isSortedSetMember('users:joindate', uid, callback);
+	};
+
+	User.existsBySlug = function (userslug, callback) {
+		User.getUidByUserslug(userslug, function (err, exists) {
 			callback(err, !! exists);
 		});
 	};
 
-	User.getUidByUsername = function(username, callback) {
+	User.getUidByUsername = function (username, callback) {
 		if (!username) {
-			return callback();
+			return callback(null, 0);
 		}
-		db.getObjectField('username:uid', username, callback);
+		db.sortedSetScore('username:uid', username, callback);
 	};
 
-	User.getUidByUserslug = function(userslug, callback) {
+	User.getUidsByUsernames = function (usernames, callback) {
+		db.sortedSetScores('username:uid', usernames, callback);
+	};
+
+	User.getUidByUserslug = function (userslug, callback) {
 		if (!userslug) {
-			return callback();
+			return callback(null, 0);
 		}
-		db.getObjectField('userslug:uid', userslug, callback);
+		db.sortedSetScore('userslug:uid', userslug, callback);
 	};
 
-	User.getUsernamesByUids = function(uids, callback) {
-		User.getMultipleUserFields(uids, ['username'], function(err, users) {
+	User.getUsernamesByUids = function (uids, callback) {
+		User.getUsersFields(uids, ['username'], function (err, users) {
 			if (err) {
 				return callback(err);
 			}
 
-			users = users.map(function(user) {
+			users = users.map(function (user) {
 				return user.username;
 			});
 
@@ -355,23 +207,23 @@ var	async = require('async'),
 		});
 	};
 
-	User.getUsernameByUserslug = function(slug, callback) {
+	User.getUsernameByUserslug = function (slug, callback) {
 		async.waterfall([
-			function(next) {
+			function (next) {
 				User.getUidByUserslug(slug, next);
 			},
-			function(uid, next) {
+			function (uid, next) {
 				User.getUserField(uid, 'username', next);
 			}
 		], callback);
 	};
 
-	User.getUidByEmail = function(email, callback) {
-		db.getObjectField('email:uid', email.toLowerCase(), callback);
+	User.getUidByEmail = function (email, callback) {
+		db.sortedSetScore('email:uid', email.toLowerCase(), callback);
 	};
 
-	User.getUsernameByEmail = function(email, callback) {
-		db.getObjectField('email:uid', email.toLowerCase(), function(err, uid) {
+	User.getUsernameByEmail = function (email, callback) {
+		db.sortedSetScore('email:uid', email.toLowerCase(), function (err, uid) {
 			if (err) {
 				return callback(err);
 			}
@@ -379,100 +231,137 @@ var	async = require('async'),
 		});
 	};
 
-	User.isModerator = function(uid, cid, callback) {
-		function filterIsModerator(err, isModerator) {
-			if (err) {
-				return callback(err);
-			}
-
-			plugins.fireHook('filter:user.isModerator', {uid: uid, cid:cid, isModerator: isModerator}, function(err, data) {
-				if (Array.isArray(uid) && !Array.isArray(data.isModerator) || Array.isArray(cid) && !Array.isArray(data.isModerator)) {
-					return callback(new Error('filter:user.isModerator - i/o mismatch'));
-				}
-
-				callback(err, data.isModerator);
-			});
-		}
-
-		if (Array.isArray(cid)) {
-			if (!parseInt(uid, 10)) {
-				return filterIsModerator(null, cid.map(function() {return false;}));
-			}
-			var uniqueCids = cid.filter(function(cid, index, array) {
-				return array.indexOf(cid) === index;
-			});
-
-			var groupNames = uniqueCids.map(function(cid) {
-				return 'cid:' + cid + ':privileges:mods';
-			});
-
-			groups.isMemberOfGroups(uid, groupNames, function(err, isMembers) {
-				if (err) {
-					return callback(err);
-				}
-
-				var map = {};
-				uniqueCids.forEach(function(cid, index) {
-					map[cid] = isMembers[index];
-				});
-
-				filterIsModerator(null, cid.map(function(cid) {
-					return map[cid];
-				}));
-			});
-		} else {
-			if (Array.isArray(uid)) {
-				groups.isMembers(uid, 'cid:' + cid + ':privileges:mods', filterIsModerator);
-			} else {
-				groups.isMember(uid, 'cid:' + cid + ':privileges:mods', filterIsModerator);
-			}
-		}
+	User.isModerator = function (uid, cid, callback) {
+		privileges.users.isModerator(uid, cid, callback);
 	};
 
-	User.isAdministrator = function(uid, callback) {
-		if (Array.isArray(uid)) {
-			groups.isMembers(uid, 'administrators', callback);
-		} else {
-			groups.isMember(uid, 'administrators', callback);
-		}
-	};
-
-	User.getIgnoredCategories = function(uid, callback) {
-		db.getSortedSetRange('uid:' + uid + ':ignored:cids', 0, -1, callback);
-	};
-
-	User.getWatchedCategories = function(uid, callback) {
-		async.parallel({
-			ignored: function(next) {
-				User.getIgnoredCategories(uid, next);
-			},
-			all: function(next) {
-				db.getSortedSetRange('categories:cid', 0, -1, next);
-			}
-		}, function(err, results) {
-			if (err) {
-				return callback(err);
-			}
-
-			var watched = results.all.filter(function(cid) {
-				return cid && results.ignored.indexOf(cid) === -1;
-			});
-			callback(null, watched);
+	User.isModeratorOfAnyCategory = function (uid, callback) {
+		User.getModeratedCids(uid, function (err, cids) {
+			callback(err, Array.isArray(cids) ? !!cids.length : false);
 		});
 	};
 
-	User.ignoreCategory = function(uid, cid, callback) {
-		if (!uid) {
-			return callback();
-		}
-		db.sortedSetAdd('uid:' + uid + ':ignored:cids', Date.now(), cid, callback);
+	User.isAdministrator = function (uid, callback) {
+		privileges.users.isAdministrator(uid, callback);
 	};
 
-	User.watchCategory = function(uid, cid, callback) {
-		if (!uid) {
+	User.isGlobalModerator = function (uid, callback) {
+		privileges.users.isGlobalModerator(uid, callback);
+	};
+
+	User.isAdminOrGlobalMod = function (uid, callback) {
+		async.parallel({
+			isAdmin: async.apply(User.isAdministrator, uid),
+			isGlobalMod: async.apply(User.isGlobalModerator, uid)
+		}, function (err, results) {
+			callback(err, results ? (results.isAdmin || results.isGlobalMod) : false);
+		});
+	};
+
+	User.isAdminOrSelf = function (callerUid, uid, callback) {
+		if (parseInt(callerUid, 10) === parseInt(uid, 10)) {
 			return callback();
 		}
-		db.sortedSetRemove('uid:' + uid + ':ignored:cids', cid, callback);
+		User.isAdministrator(callerUid, function (err, isAdmin) {
+			if (err || !isAdmin) {
+				return callback(err || new Error('[[error:no-privileges]]'));
+			}
+			callback();
+		});
+	};
+
+	User.getAdminsandGlobalMods = function (callback) {
+		async.parallel({
+			admins: async.apply(groups.getMembers, 'administrators', 0, -1),
+			mods: async.apply(groups.getMembers, 'Global Moderators', 0, -1)
+		}, function (err, results) {
+			if (err) {
+				return callback(err);
+			}
+			var uids = results.admins.concat(results.mods).filter(function (uid, index, array) {
+				return uid && array.indexOf(uid) === index;
+			});
+			User.getUsersData(uids, callback);
+		});
+	};
+
+	User.getAdminsandGlobalModsandModerators = function (callback) {
+		async.parallel([
+			async.apply(groups.getMembers, 'administrators', 0, -1),
+			async.apply(groups.getMembers, 'Global Moderators', 0, -1),
+			async.apply(User.getModeratorUids)
+		], function (err, results) {
+			if (err) {
+				return callback(err);
+			}
+
+			User.getUsersData(_.union.apply(_, results), callback);
+		});
+	};
+
+	User.getModeratorUids = function (callback) {
+		async.waterfall([
+			async.apply(db.getSortedSetRange, 'categories:cid', 0, -1),
+			function (cids, next) {
+				var groupNames = cids.map(function (cid) {
+					return 'cid:' + cid + ':privileges:mods';
+				});
+
+				groups.getMembersOfGroups(groupNames, function (err, memberSets) {
+					if (err) {
+						return next(err);
+					}
+
+					next(null, _.union.apply(_, memberSets));
+				});
+			}
+		], callback);
+	};
+
+	User.getModeratedCids = function (uid, callback) {
+		var cids;
+		async.waterfall([
+			function (next) {
+				db.getSortedSetRange('categories:cid', 0, -1, next);
+			},
+			function (_cids, next) {
+				cids = _cids;
+				User.isModerator(uid, cids, next);
+			},
+			function (isMods, next) {
+				cids = cids.filter(function (cid, index) {
+					return cid && isMods[index];
+				});
+				next(null, cids);
+			}
+		], callback);
+	};
+
+	User.addInterstitials = function (callback) {
+		plugins.registerHook('core', {
+			hook: 'filter:register.interstitial',
+			method: function (data, callback) {
+				if (meta.config.termsOfUse && !data.userData.acceptTos) {
+					data.interstitials.push({
+						template: 'partials/acceptTos',
+						data: {
+							termsOfUse: meta.config.termsOfUse
+						},
+						callback: function (userData, formData, next) {
+							if (formData['agree-terms'] === 'on') {
+								userData.acceptTos = true;
+							}
+
+							next(userData.acceptTos ? null : new Error('[[register:terms_of_use_error]]'));
+						}
+					});
+				}
+
+				callback(null, data);
+			}
+		});
+
+		callback();
 	};
 
 

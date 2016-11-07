@@ -1,23 +1,23 @@
 "use strict";
 /*global define, app, templates*/
 
-define('taskbar', function() {
+define('taskbar', function () {
 	var taskbar = {};
 
-	taskbar.init = function() {
+	taskbar.init = function () {
 		var self = this;
 
-		templates.parse('modules/taskbar', {}, function(html) {
+		templates.parse('modules/taskbar', {}, function (html) {
 			self.taskbar = $(html);
 			self.tasklist = self.taskbar.find('ul');
 			$(document.body).append(self.taskbar);
 
-			self.taskbar.on('click', 'li', function() {
+			self.taskbar.on('click', 'li', function () {
 				var	$btn = $(this),
 					module = $btn.attr('data-module'),
 					uuid = $btn.attr('data-uuid');
 
-				require([module], function(module) {
+				require([module], function (module) {
 					if (!$btn.hasClass('active')) {
 						minimizeAll();
 						module.load(uuid);
@@ -36,59 +36,59 @@ define('taskbar', function() {
 		});
 	};
 
-	taskbar.discard = function(module, uuid) {
+	taskbar.discard = function (module, uuid) {
 		var btnEl = taskbar.tasklist.find('[data-module="' + module + '"][data-uuid="' + uuid + '"]');
 		btnEl.remove();
 		
 		update();
 	};
 
-	taskbar.push = function(module, uuid, options) {
+	taskbar.push = function (module, uuid, options) {
 		var element = taskbar.tasklist.find('li[data-uuid="' + uuid + '"]');
 
-		if (element.length) {
-			return;
+		var data = {
+			module: module,
+			uuid: uuid,
+			options: options,
+			element: element
+		};
+
+		$(window).trigger('filter:taskbar.push', data);
+
+		if (!element.length && data.module) {
+			createTaskbar(data);
 		}
-
-		var title = $('<div></div>').text(options.title || 'NodeBB Task').html();
-
-		var	btnEl = $('<li />')
-			.html('<a href="#">' +
-				(options.icon ? '<i class="fa ' + options.icon + '"></i> ' : '') +
-				(options.image ? '<img src="' + options.image + '"/> ': '') +
-				'<span>' + title + '</span>' +
-				'</a>')
-			.attr({
-				'data-module': module,
-				'data-uuid': uuid
-			})
-			.addClass(options.state !== undefined ? options.state : 'active');
-
-		if (!options.state || options.state === 'active') {
-			minimizeAll();
-		}
-
-		taskbar.tasklist.append(btnEl);
-		update();
 	};
 
-	taskbar.minimize = function(module, uuid) {
+	taskbar.get = function (module) {
+		var items = $('[data-module="' + module + '"]').map(function (idx, el) {
+			return $(el).data();
+		});
+
+		return items;
+	};
+
+	taskbar.minimize = function (module, uuid) {
 		var btnEl = taskbar.tasklist.find('[data-module="' + module + '"][data-uuid="' + uuid + '"]');
-		btnEl.removeClass('active');
+		btnEl.toggleClass('active', false);
 	};
 
-	taskbar.toggleNew = function(uuid, state) {
+	taskbar.toggleNew = function (uuid, state, silent) {
 		var btnEl = taskbar.tasklist.find('[data-uuid="' + uuid + '"]');
 		btnEl.toggleClass('new', state);
+
+		if (!silent) {
+			$(window).trigger('action:taskbar.toggleNew', uuid);
+		}
 	};
 
-	taskbar.updateActive = function(uuid) {
+	taskbar.updateActive = function (uuid) {
 		var	tasks = taskbar.tasklist.find('li');
 		tasks.removeClass('active');
 		tasks.filter('[data-uuid="' + uuid + '"]').addClass('active');
 	};
 
-	taskbar.isActive = function(uuid) {
+	taskbar.isActive = function (uuid) {
 		var taskBtn = taskbar.tasklist.find('li[data-uuid="' + uuid + '"]');
 		return taskBtn.hasClass('active');
 	};
@@ -105,6 +105,35 @@ define('taskbar', function() {
 
 	function minimizeAll() {
 		taskbar.tasklist.find('.active').removeClass('active');
+	}
+
+	function createTaskbar(data) {
+		var title = $('<div></div>').text(data.options.title || 'NodeBB Task').html();
+
+		var	taskbarEl = $('<li />')
+			.addClass(data.options.className)
+			.html('<a href="#">' +
+				(data.options.icon ? '<i class="fa ' + data.options.icon + '"></i> ' : '') +
+				(data.options.image ? '<img src="' + data.options.image + '"/> ' : '') +
+				'<span>' + title + '</span>' +
+				'</a>')
+			.attr({
+				'data-module': data.module,
+				'data-uuid': data.uuid
+			})
+			.addClass(data.options.state !== undefined ? data.options.state : 'active');
+
+		if (!data.options.state || data.options.state === 'active') {
+			minimizeAll();
+		}
+
+		taskbar.tasklist.append(taskbarEl);
+		update();
+
+		data.element = taskbarEl;
+
+		taskbarEl.data(data);
+		$(window).trigger('action:taskbar.pushed', data);
 	}
 
 	return taskbar;

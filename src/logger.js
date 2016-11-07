@@ -6,10 +6,10 @@
 
 var fs = require('fs'),
 	path = require('path'),
-	express = require('express'),
 	winston = require('winston'),
 	util = require('util'),
-	socketio = require('socket.io'),
+
+	file = require('./file'),
 	meta = require('./meta'),
 	morgan = require('morgan');
 
@@ -30,20 +30,20 @@ var opts = {
 
 /* -- Logger -- */
 
-(function(Logger) {
+(function (Logger) {
 
 
-	Logger.init = function(app) {
+	Logger.init = function (app) {
 		opts.express.app = app;
 		/* Open log file stream & initialize express logging if meta.config.logger* variables are set */
 		Logger.setup();
 	};
 
-	Logger.setup = function() {
+	Logger.setup = function () {
 		Logger.setup_one('loggerPath', meta.config.loggerPath);
 	};
 
-	Logger.setup_one = function(key, value) {
+	Logger.setup_one = function (key, value) {
 		/*
 		 * 1. Open the logger stream: stdout or file
 		 * 2. Re-initialize the express logger hijack
@@ -54,7 +54,7 @@ var opts = {
 		}
 	};
 
-	Logger.setup_one_log = function(value) {
+	Logger.setup_one_log = function (value) {
 		/*
 		 * If logging is currently enabled, create a stream.
 		 * Otherwise, close the current stream
@@ -72,11 +72,11 @@ var opts = {
 		}
 	};
 
-	Logger.open = function(value) {
+	Logger.open = function (value) {
 		/* Open the streams to log to: either a path or stdout */
 		var stream;
 		if(value) {
-			if(fs.existsSync(value)) {
+			if(file.existsSync(value)) {
 				var stats = fs.statSync(value);
 				if(stats) {
 					if(stats.isDirectory()) {
@@ -91,7 +91,7 @@ var opts = {
 			}
 
 			if(stream) {
-				stream.on('error', function(err) {
+				stream.on('error', function (err) {
 					winston.error(err.message);
 				});
 			}
@@ -101,14 +101,14 @@ var opts = {
 		return stream;
 	};
 
-	Logger.close = function(stream) {
+	Logger.close = function (stream) {
 		if(stream.f !== process.stdout && stream.f) {
 			stream.end();
 		}
 		stream.f = null;
 	};
 
-	Logger.monitorConfig = function(socket, data) {
+	Logger.monitorConfig = function (socket, data) {
 		/*
 		 * This monitor's when a user clicks "save" in the Logger section of the admin panel
 		 */
@@ -117,7 +117,7 @@ var opts = {
 		Logger.io(socket);
 	};
 
-	Logger.express_open = function() {
+	Logger.express_open = function () {
 		if(opts.express.set !== 1) {
 			opts.express.set = 1;
 			opts.express.app.use(Logger.expressLogger);
@@ -128,7 +128,7 @@ var opts = {
 		opts.express.ofn = morgan('combined', {stream : opts.streams.log.f});
 	};
 
-	Logger.expressLogger = function(req,res,next) {
+	Logger.expressLogger = function (req,res,next) {
 		/*
 		 * The new express.logger
 		 *
@@ -141,82 +141,86 @@ var opts = {
 		}
 	};
 
-	Logger.prepare_io_string = function(_type, _uid, _args) {
+	Logger.prepare_io_string = function (_type, _uid, _args) {
 		/*
 		 * This prepares the output string for intercepted socket.io events
 		 *
 		 * The format is: io: <uid> <event> <args>
 		 */
 		try {
-			return 'io: '+_uid+' '+_type+' '+util.inspect(Array.prototype.slice.call(_args))+'\n';
+			return 'io: ' + _uid + ' ' + _type + ' ' + util.inspect(Array.prototype.slice.call(_args)) + '\n';
 		} catch(err) {
 			winston.info("Logger.prepare_io_string: Failed", err);
 			return "error";
 		}
 	};
 
-	Logger.io_close = function(socket) {
+	Logger.io_close = function (socket) {
 		/*
 		 * Restore all hijacked sockets to their original emit/on functions
 		 */
-		var clients = []; //socket.io.sockets.clients(); doesn't work in socket.io 1.x
-		clients.forEach(function(client) {
-			if(client.oEmit && client.oEmit !== client.emit) {
-				client.emit = client.oEmit;
-			}
+		if (!socket || !socket.io || !socket.io.sockets || !socket.io.sockets.sockets) {
+			return;
+		}
+		var clients = socket.io.sockets.sockets;
+		for (var sid in clients) {
+			if (clients.hasOwnProperty(sid)) {
+				var client = clients[sid];
+				if(client.oEmit && client.oEmit !== client.emit) {
+					client.emit = client.oEmit;
+				}
 
-			if(client.$oEmit && client.$oEmit !== client.$emit) {
-				client.$emit = client.$oEmit;
+				if(client.$oEmit && client.$oEmit !== client.$emit) {
+					client.$emit = client.$oEmit;
+				}
 			}
-		});
+		}
 	};
 
-	Logger.io = function(socket) {
+	Logger.io = function (socket) {
 		/*
 		 * Go through all of the currently established sockets & hook their .emit/.on
 		 */
-		if(!socket && !socket.io.sockets) {
+
+		if (!socket || !socket.io || !socket.io.sockets || !socket.io.sockets.sockets) {
 			return;
 		}
 
-		var clients = []; //socket.io.sockets.clients(); doesn't work in socket.io 1.x
-
-		clients.forEach(function(client) {
-			Logger.io_one(client, client.uid);
-		});
+		var clients = socket.io.sockets.sockets;
+		for(var sid in clients) {
+			if (clients.hasOwnProperty(sid)) {
+				Logger.io_one(clients[sid], clients[sid].uid);
+			}
+		}
 	};
 
-	Logger.io_one = function(socket, uid) {
+	Logger.io_one = function (socket, uid) {
 		/*
 		 * This function replaces a socket's .emit/.on functions in order to intercept events
 		 */
-		if(socket && meta.config.loggerIOStatus > 0) {
-
-			(function() {
-				function override(method, name, errorMsg) {
-					return function() {
-						if(opts.streams.log.f) {
-							opts.streams.log.f.write(Logger.prepare_io_string(name, uid, arguments));
-						}
-
-						try {
-							method.apply(socket, arguments);
-						} catch(err) {
-							winston.info(errorMsg, err);
-						}
-					};
+		function override(method, name, errorMsg) {
+			return function () {
+				if(opts.streams.log.f) {
+					opts.streams.log.f.write(Logger.prepare_io_string(name, uid, arguments));
 				}
 
-				// courtesy of: http://stackoverflow.com/a/9674248
-				socket.oEmit = socket.emit;
-				var emit = socket.emit;
-				socket.emit = override(emit, 'emit', 'Logger.io_one: emit.apply: Failed');
+				try {
+					method.apply(socket, arguments);
+				} catch(err) {
+					winston.info(errorMsg, err);
+				}
+			};
+		}
 
-				socket.$oEmit = socket.$emit;
-				var $emit = socket.$emit;
-				socket.$emit = override($emit, 'on', 'Logger.io_one: $emit.apply: Failed');
+		if (socket && meta.config.loggerIOStatus > 0) {
+			// courtesy of: http://stackoverflow.com/a/9674248
+			socket.oEmit = socket.emit;
+			var emit = socket.emit;
+			socket.emit = override(emit, 'emit', 'Logger.io_one: emit.apply: Failed');
 
-			})();
+			socket.$oEmit = socket.$emit;
+			var $emit = socket.$emit;
+			socket.$emit = override($emit, 'on', 'Logger.io_one: $emit.apply: Failed');
 		}
 	};
 

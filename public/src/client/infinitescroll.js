@@ -1,85 +1,88 @@
 'use strict';
 
-/* globals define, socket, ajaxify, translator, templates, app */
+/* globals define, socket, app */
 
-define('forum/infinitescroll', function() {
+define('forum/infinitescroll', function () {
 
 	var scroll = {};
 	var callback;
 	var previousScrollTop = 0;
 	var loadingMore	= false;
-	var topOffset = 0;
+	var container;
 
-	scroll.init = function(cb, _topOffest) {
-		callback = cb;
-		topOffset = _topOffest || 0;
+	scroll.init = function (el, cb) {
+		if (typeof el === 'function') {
+			callback = el;
+			container = $('body');
+		} else {
+			callback = cb;
+			container = el || $('body');
+		}
+
 		$(window).off('scroll', onScroll).on('scroll', onScroll);
 	};
 
 	function onScroll() {
-		var originalPostEl = $('li[data-index="0"]'),
-			top = $(window).height() * 0.15 + topOffset + (originalPostEl ? originalPostEl.outerHeight() : 0),
-			bottom = ($(document).height() - $(window).height()) * 0.85,
-			currentScrollTop = $(window).scrollTop();
-
-		if(currentScrollTop < top && currentScrollTop < previousScrollTop) {
-			callback(-1);
-		} else if (currentScrollTop > bottom && currentScrollTop > previousScrollTop) {
-			callback(1);
+		if (loadingMore) {
+			return;
 		}
+		var currentScrollTop = $(window).scrollTop();
+		var wh = $(window).height();
+		var viewportHeight = container.height() - wh;
+		var offsetTop = container.offset() ? container.offset().top : 0;
+		var scrollPercent = 100 * (currentScrollTop - offsetTop) / (viewportHeight <= 0 ? wh : viewportHeight);
+
+		var top = 20, bottom = 80;
+
+		var direction = currentScrollTop > previousScrollTop ? 1 : -1;
+
+		if (scrollPercent < top && currentScrollTop < previousScrollTop) {
+			callback(direction);
+		} else if (scrollPercent > bottom && currentScrollTop > previousScrollTop) {
+			callback(direction);
+		} else if (scrollPercent < 0 && direction > 0 && viewportHeight < 0) {
+			callback(direction);
+		}
+
 		previousScrollTop = currentScrollTop;
 	}
 
-	scroll.loadMore = function(method, data, callback) {
+	scroll.loadMore = function (method, data, callback) {
 		if (loadingMore) {
 			return;
 		}
 		loadingMore = true;
-		socket.emit(method, data, function(err, data) {
+
+		var hookData = {method: method, data: data};
+		$(window).trigger('action:infinitescroll.loadmore', hookData);
+
+		socket.emit(hookData.method, hookData.data, function (err, data) {
 			if (err) {
 				loadingMore = false;
 				return app.alertError(err.message);
 			}
-			callback(data, function() {
+			callback(data, function () {
 				loadingMore = false;
 			});
 		});
 	};
 
-	scroll.parseAndTranslate = function(template, blockName, data, callback) {
-		templates.parse(template, blockName, data, function(html) {
-			translator.translate(html, function(translatedHTML) {
-				callback($(translatedHTML));
-			});
-		});
-	};
-
-	scroll.calculateAfter = function(direction, selector, count, reverse, callback) {
-		var after = 0,
-			offset = 0,
-			el = direction > 0 ? $(selector).last() : $(selector).first(),
-			increment;
-
-		count = reverse ? -count : count;
-		increment = reverse ? -1 : 1;
-
-		if (direction > 0) {
-			after = parseInt(el.attr('data-index'), 10) + increment;
-		} else {
-			after = parseInt(el.attr('data-index'), 10);
-			if (isNaN(after)) {
-				after = 0;
-			}
-			after -= count;
-			if (after < 0) {
-				after = 0;
-			}
-			if (el && el.offset()) {
-				offset = el.offset().top - $('#header-menu').offset().top + $('#header-menu').height();
-			}
+	scroll.removeExtra = function (els, direction, count) {
+		if (els.length <= count) {
+			return;
 		}
 
-		callback(after, offset, el);
+		var removeCount = els.length - count;
+		if (direction > 0) {
+			var height = $(document).height(),
+				scrollTop = $(window).scrollTop();
+
+			els.slice(0, removeCount).remove();
+
+			$(window).scrollTop(scrollTop + ($(document).height() - height));
+		} else {
+			els.slice(els.length - removeCount).remove();
+		}
 	};
 
 	return scroll;

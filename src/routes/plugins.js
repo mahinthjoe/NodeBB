@@ -1,54 +1,40 @@
 "use strict";
 
-var	_ = require('underscore'),
-	nconf = require('nconf'),
-	path = require('path'),
-	fs = require('fs'),
-	validator = require('validator'),
-	async = require('async'),
-	winston = require('winston'),
+var _ = require('underscore');
+var path = require('path');
 
-	plugins = require('../plugins'),
-	helpers = require('../controllers/helpers');
+var plugins = require('../plugins');
 
-
-module.exports = function(app, middleware, controllers) {
+module.exports = function (app, middleware, controllers) {
 	// Static Assets
-	app.get('/plugins/:id/*', middleware.addExpiresHeaders, function(req, res, next) {
-		var	relPath = req._parsedUrl.pathname.replace('/plugins/', ''),
-			matches = _.map(plugins.staticDirs, function(realPath, mappedPath) {
-				if (relPath.match(mappedPath)) {
-					return mappedPath;
-				} else {
-					return null;
+	app.get('/plugins/:id/*', middleware.addExpiresHeaders, function (req, res, next) {
+
+		var relPath = req._parsedUrl.pathname.replace('/plugins/', '');
+
+		var matches = _.map(plugins.staticDirs, function (realPath, mappedPath) {
+			if (relPath.match(mappedPath)) {
+				var pathToFile = path.join(plugins.staticDirs[mappedPath], decodeURIComponent(relPath.slice(mappedPath.length)));
+				if (pathToFile.startsWith(plugins.staticDirs[mappedPath])) {
+					return pathToFile;
 				}
-			}).filter(function(a) { return a; });
+			}
 
-		if (matches) {
-			async.map(matches, function(mappedPath, next) {
-				var	filePath = path.join(plugins.staticDirs[mappedPath], decodeURIComponent(relPath.slice(mappedPath.length)));
+			return null;
+		}).filter(Boolean);
 
-				fs.exists(filePath, function(exists) {
-					if (exists) {
-						next(null, filePath);
-					} else {
-						next();
-					}
-				});
-			}, function(err, matches) {
-				if (err) {
+		if (!matches || !matches.length) {
+			return next();
+		}
+
+		res.sendFile(matches[0], {}, function (err) {
+			if (err) {
+				if (err.code === 'ENOENT') {
+					// File doesn't exist, this isn't an error, to send to 404 handler
+					return next();
+				} else {
 					return next(err);
 				}
-				matches = matches.filter(Boolean);
-
-				if (matches.length) {
-					res.sendFile(matches[0]);
-				} else {
-					helpers.notFound(req, res);
-				}
-			});
-		} else {
-			helpers.notFound(req, res);
-		}
+			}
+		});
 	});
 };

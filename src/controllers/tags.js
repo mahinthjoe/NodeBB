@@ -1,67 +1,93 @@
 "use strict";
 
-var tagsController = {},
-	async = require('async'),
-	nconf = require('nconf'),
-	validator = require('validator'),
-	meta = require('../meta'),
-	topics = require('../topics'),
-	helpers =  require('./helpers');
 
-tagsController.getTag = function(req, res, next) {
-	var tag = validator.escape(req.params.tag);
-	var uid = req.user ? req.user.uid : 0;
-	var end = (parseInt(meta.config.topicsPerList, 10) || 20) - 1;
+var async = require('async');
+var nconf = require('nconf');
+var validator = require('validator');
 
-	topics.getTagTids(tag, 0, end, function(err, tids) {
+var user = require('../user');
+var topics = require('../topics');
+var pagination = require('../pagination');
+var helpers =  require('./helpers');
+
+var tagsController = {};
+
+tagsController.getTag = function (req, res, next) {
+	var tag = validator.escape(String(req.params.tag));
+	var page = parseInt(req.query.page, 10) || 1;
+
+	var templateData = {
+		topics: [],
+		tag: tag,
+		breadcrumbs: helpers.buildBreadcrumbs([{text: '[[tags:tags]]', url: '/tags'}, {text: tag}]),
+		title: '[[pages:tag, ' + tag + ']]'
+	};
+	var settings;
+	var topicCount = 0;
+	async.waterfall([
+		function (next) {
+			user.getSettings(req.uid, next);
+		},
+		function (_settings, next) {
+			settings = _settings;
+			var start = Math.max(0, (page - 1) * settings.topicsPerPage);
+			var stop = start + settings.topicsPerPage - 1;
+			templateData.nextStart = stop + 1;
+			async.parallel({
+				topicCount: function (next) {
+					topics.getTagTopicCount(tag, next);
+				},
+				tids: function (next) {
+					topics.getTagTids(req.params.tag, start, stop, next);
+				}
+			}, next);
+		},
+		function (results, next) {
+			if (Array.isArray(results.tids) && !results.tids.length) {
+				return res.render('tag', templateData);
+			}
+			topicCount = results.topicCount;
+			topics.getTopics(results.tids, req.uid, next);
+		}
+	], function (err, topics) {
 		if (err) {
 			return next(err);
 		}
 
-		if (Array.isArray(tids) && !tids.length) {
-			topics.deleteTag(tag);
-			return res.render('tag', {topics: [], tag: tag});
-		}
-
-		topics.getTopics(tids, uid, function(err, topics) {
-			if (err) {
-				return next(err);
+		res.locals.metaTags = [
+			{
+				name: 'title',
+				content: tag
+			},
+			{
+				property: 'og:title',
+				content: tag
+			},
+			{
+				property: 'og:url',
+				content: nconf.get('url') + '/tags/' + tag
 			}
+		];
+		templateData.topics = topics;
 
-			res.locals.metaTags = [
-				{
-					name: 'title',
-					content: tag
-				},
-				{
-					property: 'og:title',
-					content: tag
-				},
-				{
-					property: 'og:url',
-					content: nconf.get('url') + '/tags/' + tag
-				}
-			];
-			var data = {
-				topics: topics,
-				tag: tag,
-				nextStart: end + 1,
-				breadcrumbs: helpers.buildBreadcrumbs([{text: '[[tags:tags]]', url: '/tags'}, {text: tag}])
-			};
-			res.render('tag', data);
-		});
+		var pageCount =	Math.max(1, Math.ceil(topicCount / settings.topicsPerPage));
+		templateData.pagination = pagination.create(page, pageCount);
+
+		res.render('tag', templateData);
 	});
 };
 
-tagsController.getTags = function(req, res, next) {
-	topics.getTags(0, 99, function(err, tags) {
+tagsController.getTags = function (req, res, next) {
+	topics.getTags(0, 99, function (err, tags) {
 		if (err) {
 			return next(err);
 		}
+		tags = tags.filter(Boolean);
 		var data = {
 			tags: tags,
 			nextStart: 100,
-			breadcrumbs: helpers.buildBreadcrumbs([{text: '[[tags:tags]]'}])
+			breadcrumbs: helpers.buildBreadcrumbs([{text: '[[tags:tags]]'}]),
+			title: '[[pages:tags]]'
 		};
 		res.render('tags', data);
 	});

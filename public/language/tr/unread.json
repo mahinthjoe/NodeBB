@@ -5,5 +5,9 @@
     "mark_as_read": "Okundu Olarak İşaretle",
     "selected": "Seçili",
     "all": "Hepsi",
-    "topics_marked_as_read.success": "Başlıklar okundu olarak işaretlendi!"
+    "all_categories": "Tüm kategoriler",
+    "topics_marked_as_read.success": "Başlıklar okundu olarak işaretlendi!",
+    "all-topics": "Tüm Başlıklar",
+    "new-topics": "Yeni Başlıklar",
+    "watched-topics": "İzlenen Başlıklar"
 }

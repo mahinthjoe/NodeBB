@@ -3,7 +3,11 @@
     "no_unread_topics": "Нет непрочитанных тем.",
     "load_more": "Загрузить еще",
     "mark_as_read": "Пометить прочитанным",
-    "selected": "Выбраны",
+    "selected": "Выбрано",
     "all": "Все",
-    "topics_marked_as_read.success": "Темы помечены как прочитанные!"
+    "all_categories": "Все сообщества",
+    "topics_marked_as_read.success": "Все темы помечены как прочитанные",
+    "all-topics": "Все темы",
+    "new-topics": "Новые темы",
+    "watched-topics": "Подписанные темы"
 }

@@ -5,5 +5,9 @@
     "mark_as_read": "Σημείωση ώς Αναγνωσμένα",
     "selected": "Επιλεγμένα",
     "all": "Όλα",
-    "topics_marked_as_read.success": "Τα θέματα σημειώθηκαν ως αναγνωσμένα!"
+    "all_categories": "All categories",
+    "topics_marked_as_read.success": "Τα θέματα σημειώθηκαν ως αναγνωσμένα!",
+    "all-topics": "All Topics",
+    "new-topics": "New Topics",
+    "watched-topics": "Watched Topics"
 }

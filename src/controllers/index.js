@@ -1,147 +1,267 @@
 "use strict";
 
-var async = require('async'),
-	nconf = require('nconf'),
-	validator = require('validator'),
-	winston = require('winston'),
+var async = require('async');
+var nconf = require('nconf');
+var validator = require('validator');
+var winston = require('winston');
 
-	auth = require('../routes/authentication'),
-	meta = require('../meta'),
-	user = require('../user'),
-	posts = require('../posts'),
-	topics = require('../topics'),
-	plugins = require('../plugins'),
-	categories = require('../categories'),
-	privileges = require('../privileges'),
-	helpers = require('./helpers');
+var meta = require('../meta');
+var user = require('../user');
+var plugins = require('../plugins');
+var helpers = require('./helpers');
 
 var Controllers = {
-	posts: require('./posts'),
 	topics: require('./topics'),
+	posts: require('./posts'),
 	categories: require('./categories'),
+	category: require('./category'),
+	unread: require('./unread'),
+	recent: require('./recent'),
+	popular: require('./popular'),
 	tags: require('./tags'),
 	search: require('./search'),
 	users: require('./users'),
 	groups: require('./groups'),
 	accounts: require('./accounts'),
-	static: require('./static'),
+	authentication: require('./authentication'),
 	api: require('./api'),
 	admin: require('./admin'),
+	globalMods: require('./globalmods'),
+	mods: require('./mods'),
+	sitemap: require('./sitemap')
 };
 
 
-Controllers.home = function(req, res, next) {
-	var route = meta.config.homePageRoute || 'categories',
-		hook = 'action:homepage.get:' + route;
+Controllers.home = function (req, res, next) {
+	var route = meta.config.homePageRoute || (meta.config.homePageCustom || '').replace(/^\/+/, '') || 'categories';
 
-	if (plugins.hasListeners(hook)) {
-		plugins.fireHook(hook, {req: req, res: res, next: next});
-	} else {
-		if (route === 'categories') {
-			Controllers.categories.list(req, res, next);
-		} else if (route === 'recent') {
-			Controllers.categories.recent(req, res, next);
-		} else if (route === 'popular') {
-			Controllers.categories.popular(req, res, next);
-		} else {
-			next();
+	user.getSettings(req.uid, function (err, settings) {
+		if (err) {
+			return next(err);
 		}
-	}
+		if (parseInt(meta.config.allowUserHomePage, 10) === 1 && settings.homePageRoute !== 'undefined' && settings.homePageRoute !== 'none') {
+			route = settings.homePageRoute || route;
+		}
+
+		var hook = 'action:homepage.get:' + route;
+
+		if (plugins.hasListeners(hook)) {
+			return plugins.fireHook(hook, {req: req, res: res, next: next});
+		}
+
+		if (route === 'categories' || route === '/') {
+			Controllers.categories.list(req, res, next);
+		} else if (route === 'unread') {
+			Controllers.unread.get(req, res, next);
+		} else if (route === 'recent') {
+			Controllers.recent.get(req, res, next);
+		} else if (route === 'popular') {
+			Controllers.popular.get(req, res, next);
+		} else {
+			var match = /^category\/(\d+)\/(.*)$/.exec(route);
+
+			if (match) {
+				req.params.topic_index = "1";
+				req.params.category_id = match[1];
+				req.params.slug = match[2];
+				Controllers.category.get(req, res, next);
+			} else {
+				res.redirect(route);
+			}
+		}
+	});
 };
 
-Controllers.reset = function(req, res, next) {
+Controllers.reset = function (req, res, next) {
 	if (req.params.code) {
-		user.reset.validate(req.params.code, function(err, valid) {
+		user.reset.validate(req.params.code, function (err, valid) {
+			if (err) {
+				return next(err);
+			}
 			res.render('reset_code', {
 				valid: valid,
-				reset_code: req.params.code ? req.params.code : null,
-				breadcrumbs: helpers.buildBreadcrumbs([{text: '[[reset_password:reset_password]]', url: '/reset'}, {text: '[[reset_password:update_password]]'}])
+				displayExpiryNotice: req.session.passwordExpired,
+				code: req.params.code,
+				minimumPasswordLength: parseInt(meta.config.minimumPasswordLength, 10),
+				breadcrumbs: helpers.buildBreadcrumbs([{text: '[[reset_password:reset_password]]', url: '/reset'}, {text: '[[reset_password:update_password]]'}]),
+				title: '[[pages:reset]]'
 			});
+
+			delete req.session.passwordExpired;
 		});
 	} else {
 		res.render('reset', {
-			reset_code: req.params.code ? req.params.code : null,
-			breadcrumbs: helpers.buildBreadcrumbs([{text: '[[reset_password:reset_password]]'}])
+			code: null,
+			breadcrumbs: helpers.buildBreadcrumbs([{text: '[[reset_password:reset_password]]'}]),
+			title: '[[pages:reset]]'
 		});
 	}
-
 };
 
-Controllers.login = function(req, res, next) {
-	var data = {},
-		loginStrategies = auth.getLoginStrategies(),
-		emailersPresent = plugins.hasListeners('action:email.send');
+Controllers.login = function (req, res, next) {
+	var data = {};
+	var loginStrategies = require('../routes/authentication').getLoginStrategies();
+	var registrationType = meta.config.registrationType || 'normal';
+
+	var allowLoginWith = (meta.config.allowLoginWith || 'username-email');
+	var returnTo = (req.headers['x-return-to'] || '').replace(nconf.get('url'), '');
+
+	var errorText;
+	if (req.query.error === 'csrf-invalid') {
+		errorText = '[[error:csrf-invalid]]';
+	} else if (req.query.error) {
+		errorText = validator.escape(String(req.query.error));
+	}
+
+	if (returnTo) {
+		req.session.returnTo = returnTo;
+	}
 
 	data.alternate_logins = loginStrategies.length > 0;
 	data.authentication = loginStrategies;
-	data.showResetLink = emailersPresent;
-	data.allowLocalLogin = parseInt(meta.config.allowLocalLogin, 10) === 1;
-	data.allowRegistration = parseInt(meta.config.allowRegistration, 10) === 1;
-	data.allowLoginWith = '[[login:' + (meta.config.allowLoginWith || 'username-email') + ']]';
+	data.allowLocalLogin = parseInt(meta.config.allowLocalLogin, 10) === 1 || parseInt(req.query.local, 10) === 1;
+	data.allowRegistration = registrationType === 'normal' || registrationType === 'admin-approval' || registrationType === 'admin-approval-ip';
+	data.allowLoginWith = '[[login:' + allowLoginWith + ']]';
 	data.breadcrumbs = helpers.buildBreadcrumbs([{text: '[[global:login]]'}]);
-	data.error = req.flash('error')[0];
+	data.error = req.flash('error')[0] || errorText;
+	data.title = '[[pages:login]]';
 
-	res.render('login', data);
+	if (!data.allowLocalLogin && !data.allowRegistration && data.alternate_logins && data.authentication.length === 1) {
+		if (res.locals.isAPI) {
+			return helpers.redirect(res, {
+				external: data.authentication[0].url
+			});
+		} else {
+			return res.redirect(data.authentication[0].url);
+		}
+	}
+	if (req.uid) {
+		user.getUserFields(req.uid, ['username', 'email'], function (err, user) {
+			if (err) {
+				return next(err);
+			}
+			data.username = allowLoginWith === 'email' ? user.email : user.username;
+			data.alternate_logins = [];
+			res.render('login', data);
+		});
+	} else {
+		res.render('login', data);
+	}
+
 };
 
-Controllers.register = function(req, res, next) {
-	if(meta.config.allowRegistration !== undefined && parseInt(meta.config.allowRegistration, 10) === 0) {
-		return res.redirect(nconf.get('relative_path') + '/403');
+Controllers.register = function (req, res, next) {
+	var registrationType = meta.config.registrationType || 'normal';
+
+	if (registrationType === 'disabled') {
+		return next();
 	}
 
-	var data = {},
-		loginStrategies = auth.getLoginStrategies();
-
-	if (loginStrategies.length === 0) {
-		data = {
-			'register_window:spansize': 'col-md-12',
-			'alternate_logins': false
-		};
-	} else {
-		data = {
-			'register_window:spansize': 'col-md-6',
-			'alternate_logins': true
-		};
+	var errorText;
+	if (req.query.error === 'csrf-invalid') {
+		errorText = '[[error:csrf-invalid]]';
 	}
 
-	data.authentication = loginStrategies;
-
-	data.minimumUsernameLength = meta.config.minimumUsernameLength;
-	data.maximumUsernameLength = meta.config.maximumUsernameLength;
-	data.minimumPasswordLength = meta.config.minimumPasswordLength;
-	data.termsOfUse = meta.config.termsOfUse;
-	data.breadcrumbs = helpers.buildBreadcrumbs([{text: '[[register:register]]'}]);
-	data.regFormEntry = [];
-	data.error = req.flash('error')[0];
-
-	plugins.fireHook('filter:register.build', {req: req, res: res, templateData: data}, function(err, data) {
-		if (err && process.env === 'development') {
-			winston.warn(JSON.stringify(err));
+	async.waterfall([
+		function (next) {
+			if (registrationType === 'invite-only' || registrationType === 'admin-invite-only') {
+				user.verifyInvitation(req.query, next);
+			} else {
+				next();
+			}
+		},
+		function (next) {
+			plugins.fireHook('filter:parse.post', {postData: {content: meta.config.termsOfUse || ''}}, next);
+		}
+	], function (err, termsOfUse) {
+		if (err) {
 			return next(err);
 		}
-		res.render('register', data.templateData);
+		var loginStrategies = require('../routes/authentication').getLoginStrategies();
+		var data = {
+			'register_window:spansize': loginStrategies.length ? 'col-md-6' : 'col-md-12',
+			'alternate_logins': !!loginStrategies.length
+		};
+
+		data.authentication = loginStrategies;
+
+		data.minimumUsernameLength = parseInt(meta.config.minimumUsernameLength, 10);
+		data.maximumUsernameLength = parseInt(meta.config.maximumUsernameLength, 10);
+		data.minimumPasswordLength = parseInt(meta.config.minimumPasswordLength, 10);
+		data.termsOfUse = termsOfUse.postData.content;
+		data.breadcrumbs = helpers.buildBreadcrumbs([{text: '[[register:register]]'}]);
+		data.regFormEntry = [];
+		data.error = req.flash('error')[0] || errorText;
+		data.title = '[[pages:register]]';
+
+		res.render('register', data);
 	});
 };
 
+Controllers.registerInterstitial = function (req, res, next) {
+	if (!req.session.hasOwnProperty('registration')) {
+		return res.redirect(nconf.get('relative_path') + '/register');
+	}
 
-Controllers.confirmEmail = function(req, res, next) {
-	user.email.confirm(req.params.code, function (err) {
-		res.render('confirm', {
-			error: err ? err.message : ''
+	plugins.fireHook('filter:register.interstitial', {
+		userData: req.session.registration,
+		interstitials: []
+	}, function (err, data) {
+		if (err) {
+			return next(err);
+		}
+
+		if (!data.interstitials.length) {
+			return next();
+		}
+
+		var renders = data.interstitials.map(function (interstitial) {
+			return async.apply(req.app.render.bind(req.app), interstitial.template, interstitial.data || {});
+		});
+		var errors = req.flash('error');
+
+		async.parallel(renders, function (err, sections) {
+			if (err) {
+				return next(err);
+			}
+
+			res.render('registerComplete', {
+				title: '[[pages:registration-complete]]',
+				errors: errors,
+				sections: sections
+			});
 		});
 	});
 };
 
-Controllers.sitemap = function(req, res, next) {
-	if (parseInt(meta.config['feeds:disableSitemap'], 10) === 1) {
-		return helpers.notFound(req, res);
-	}
+Controllers.compose = function (req, res, next) {
+	plugins.fireHook('filter:composer.build', {
+		req: req,
+		res: res,
+		next: next,
+		templateData: {}
+	}, function (err, data) {
+		if (err) {
+			return next(err);
+		}
 
-	var sitemap = require('../sitemap.js');
+		if (data.templateData.disabled) {
+			res.render('', {
+				title: '[[modules:composer.compose]]'
+			});
+		} else {
+			data.templateData.title = '[[modules:composer.compose]]';
+			res.render('compose', data.templateData);
+		}
+	});
+};
 
-	sitemap.render(function(xml) {
-		res.header('Content-Type', 'application/xml');
-		res.send(xml);
+Controllers.confirmEmail = function (req, res) {
+	user.email.confirm(req.params.code, function (err) {
+		res.render('confirm', {
+			error: err ? err.message : '',
+			title: '[[pages:confirm]]',
+		});
 	});
 };
 
@@ -157,13 +277,59 @@ Controllers.robots = function (req, res) {
 	}
 };
 
-Controllers.outgoing = function(req, res, next) {
-	var url = req.query.url,
-		data = {
-			url: url,
-			title: meta.config.title,
-			breadcrumbs: helpers.buildBreadcrumbs([{text: '[[notifications:outgoing_link]]'}])
-		};
+Controllers.manifest = function (req, res) {
+	var manifest = {
+		name: meta.config.title || 'NodeBB',
+		start_url: nconf.get('relative_path') + '/',
+		display: 'standalone',
+		orientation: 'portrait',
+		icons: []
+	};
+
+	if (meta.config['brand:touchIcon']) {
+		manifest.icons.push({
+			src: nconf.get('relative_path') + '/uploads/system/touchicon-36.png',
+			sizes: '36x36',
+			type: 'image/png',
+			density: 0.75
+		}, {
+			src: nconf.get('relative_path') + '/uploads/system/touchicon-48.png',
+			sizes: '48x48',
+			type: 'image/png',
+			density: 1.0
+		}, {
+			src: nconf.get('relative_path') + '/uploads/system/touchicon-72.png',
+			sizes: '72x72',
+			type: 'image/png',
+			density: 1.5
+		}, {
+			src: nconf.get('relative_path') + '/uploads/system/touchicon-96.png',
+			sizes: '96x96',
+			type: 'image/png',
+			density: 2.0
+		}, {
+			src: nconf.get('relative_path') + '/uploads/system/touchicon-144.png',
+			sizes: '144x144',
+			type: 'image/png',
+			density: 3.0
+		}, {
+			src: nconf.get('relative_path') + '/uploads/system/touchicon-192.png',
+			sizes: '192x192',
+			type: 'image/png',
+			density: 4.0
+		});
+	}
+
+	res.status(200).json(manifest);
+};
+
+Controllers.outgoing = function (req, res) {
+	var url = req.query.url || '';
+	var data = {
+		outgoing: validator.escape(String(url)),
+		title: meta.config.title,
+		breadcrumbs: helpers.buildBreadcrumbs([{text: '[[notifications:outgoing_link]]'}])
+	};
 
 	if (url) {
 		res.render('outgoing', data);
@@ -172,11 +338,115 @@ Controllers.outgoing = function(req, res, next) {
 	}
 };
 
-Controllers.termsOfUse = function(req, res, next) {
+Controllers.termsOfUse = function (req, res, next) {
 	if (!meta.config.termsOfUse) {
-		return helpers.notFound(req, res);
+		return next();
 	}
 	res.render('tos', {termsOfUse: meta.config.termsOfUse});
+};
+
+Controllers.ping = function (req, res) {
+	res.status(200).send(req.path === '/sping' ? 'healthy' : '200');
+};
+
+Controllers.handle404 = function (req, res) {
+	var relativePath = nconf.get('relative_path');
+	var isLanguage = new RegExp('^' + relativePath + '/language/.*/.*.json');
+	var isClientScript = new RegExp('^' + relativePath + '\\/src\\/.+\\.js');
+
+	if (plugins.hasListeners('action:meta.override404')) {
+		return plugins.fireHook('action:meta.override404', {
+			req: req,
+			res: res,
+			error: {}
+		});
+	}
+
+	if (isClientScript.test(req.url)) {
+		res.type('text/javascript').status(200).send('');
+	} else if (isLanguage.test(req.url)) {
+		res.status(200).json({});
+	} else if (req.path.startsWith(relativePath + '/uploads') || (req.get('accept') && req.get('accept').indexOf('text/html') === -1) || req.path === '/favicon.ico') {
+		meta.errors.log404(req.path || '');
+		res.sendStatus(404);
+	} else if (req.accepts('html')) {
+		if (process.env.NODE_ENV === 'development') {
+			winston.warn('Route requested but not found: ' + req.url);
+		}
+
+		meta.errors.log404(req.path.replace(/^\/api/, '') || '');
+		res.status(404);
+
+		var path = String(req.path || '');
+
+		if (res.locals.isAPI) {
+			return res.json({path: validator.escape(path.replace(/^\/api/, '')), title: '[[global:404.title]]'});
+		}
+		var middleware = require('../middleware');
+		middleware.buildHeader(req, res, function () {
+			res.render('404', {path: validator.escape(path), title: '[[global:404.title]]'});
+		});
+	} else {
+		res.status(404).type('txt').send('Not found');
+	}
+};
+
+Controllers.handleURIErrors = function (err, req, res, next) {
+	// Handle cases where malformed URIs are passed in
+	if (err instanceof URIError) {
+		var tidMatch = req.path.match(/^\/topic\/(\d+)\//);
+		var cidMatch = req.path.match(/^\/category\/(\d+)\//);
+
+		if (tidMatch) {
+			res.redirect(nconf.get('relative_path') + tidMatch[0]);
+		} else if (cidMatch) {
+			res.redirect(nconf.get('relative_path') + cidMatch[0]);
+		} else {
+			winston.warn('[controller] Bad request: ' + req.path);
+			if (res.locals.isAPI) {
+				res.status(400).json({
+					error: '[[global:400.title]]'
+				});
+			} else {
+				var middleware = require('../middleware');
+				middleware.buildHeader(req, res, function () {
+					res.render('400', { error: validator.escape(String(err.message)) });
+				});
+			}
+		}
+
+		return;
+	} else {
+		next(err);
+	}
+};
+
+Controllers.handleErrors = function (err, req, res, next) {
+	switch (err.code) {
+		case 'EBADCSRFTOKEN':
+			winston.error(req.path + '\n', err.message);
+			return res.sendStatus(403);
+		case 'blacklisted-ip':
+			return res.status(403).type('text/plain').send(err.message);
+	}
+
+	if (parseInt(err.status, 10) === 302 && err.path) {
+		return res.locals.isAPI ? res.status(302).json(err.path) : res.redirect(err.path);
+	}
+
+	winston.error(req.path + '\n', err.stack);
+
+	res.status(err.status || 500);
+
+	var path = String(req.path || '');
+	if (res.locals.isAPI) {
+		res.json({path: validator.escape(path), error: err.message});
+	} else {
+		var middleware = require('../middleware');
+		middleware.buildHeader(req, res, function () {
+			res.render('500', { path: validator.escape(path), error: validator.escape(String(err.message)) });
+		});
+	}
 };
 
 module.exports = Controllers;

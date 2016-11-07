@@ -5,5 +5,9 @@
     "mark_as_read": "Segna come Letto",
     "selected": "Selezionati",
     "all": "Tutti",
-    "topics_marked_as_read.success": "Discussione marcata come letta!"
+    "all_categories": "Tutte le categorie",
+    "topics_marked_as_read.success": "Discussione marcata come letta!",
+    "all-topics": "Tutte le Discussioni",
+    "new-topics": "Nuova Discussione",
+    "watched-topics": "Discussioni seguite"
 }

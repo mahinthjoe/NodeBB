@@ -1,70 +1,120 @@
 "use strict";
-/* global define, app, ajaxify, socket, templates, bootbox, translator */
+/* global define, app, ajaxify, socket, templates */
 
-define('admin/general/navigation', function() {
+define('admin/general/navigation', ['translator', 'iconSelect', 'jqueryui'], function (translator, iconSelect, jqueryui) {
 	var navigation = {},
 		available;
 
-	navigation.init = function() {
-		available = JSON.parse(ajaxify.variables.get('available'));
+	navigation.init = function () {
+		available = ajaxify.data.available;
 
-		$('#enabled').html(translator.unescape($('#enabled').html()));
-		translator.translate(translator.unescape($('#available').html()), function(html) {
+		$('#enabled .unescape').each(function () {
+			$(this).val(translator.unescape($(this).val()));
+		});
+
+		translator.translate(translator.unescape($('#available').html()), function (html) {
 			$('#available').html(html)
-				.find('li').draggable({
-					connectToSortable: '#enabled',
+				.find('li .drag-item').draggable({
+					connectToSortable: '#active-navigation',
 					helper: 'clone',
 					distance: 10,
 					stop: drop
 				});
 		});
+		
+		$('#active-navigation').sortable().droppable({
+			accept: $('#available li .drag-item')
+		});
+
+		$('#enabled').on('click', '.iconPicker', function () {
+			var iconEl = $(this).find('i');
+			iconSelect.init(iconEl, function (el) {
+				var newIconClass = el.attr('value');
+				var index = iconEl.parents('[data-index]').attr('data-index');
+				$('#active-navigation [data-index="' + index + '"] i').attr('class', 'fa fa-fw ' + newIconClass);
+				iconEl.siblings('[name="iconClass"]').val(newIconClass);
+				iconEl.siblings('.change-icon-link').toggleClass('hidden', !!newIconClass);
+			});
+		});
+
+		$('#active-navigation').on('click', 'li', onSelect);
 
 		$('#enabled')
-			.on('click', '.delete', remove)
-			.on('click', '.toggle', toggle)
-			.sortable()
-			.droppable({
-				accept: $('#available li')
-			});
+		 	.on('click', '.delete', remove)
+		 	.on('click', '.toggle', toggle);
 
 		$('#save').on('click', save);
 	};
 
+	function onSelect() {
+		var clickedIndex = $(this).attr('data-index');
+		$('#active-navigation li').removeClass('active');
+		$(this).addClass('active');
+
+		var detailsForm = $('#enabled').children('[data-index="' + clickedIndex + '"]');
+		$('#enabled li').addClass('hidden');
+
+		if (detailsForm.length) {
+			detailsForm.removeClass('hidden');
+		}
+		return false;
+	}
+
 	function drop(ev, ui) {
 		var id = ui.helper.attr('data-id'),
-			el = $('#enabled [data-id="' + id + '"]'),
-			data = id === 'custom' ? {} : available[id];
+			el = $('#active-navigation [data-id="' + id + '"]'),
+			data = id === 'custom' ? {iconClass: 'fa-navicon'} : available[id];
 
 		data.enabled = false;
+		data.index = (parseInt($('#enabled').children().last().attr('data-index'), 10) || 0) + 1;
 
-		templates.parse('admin/general/navigation', 'enabled', {enabled: [data]}, function(li) {
+		templates.parse('admin/general/navigation', 'navigation', {navigation: [data]}, function (li) {
 			li = $(translator.unescape(li));
 			el.after(li);
 			el.remove();
+		});
+
+		templates.parse('admin/general/navigation', 'enabled', {enabled: [data]}, function (li) {
+			li = $(translator.unescape(li));
+			$('#enabled').append(li);
+			componentHandler.upgradeDom();
 		});
 	}
 
 	function save() {
 		var nav = [];
 
-		$('#enabled li').each(function() {
-			var form = $(this).find('form').serializeArray(),
-				data = {};
+		var indices = [];
+		$('#active-navigation li').each(function () {
+			indices.push($(this).attr('data-index'));
+		});
 
-			form.forEach(function(input) {
-				data[input.name] = translator.escape(input.value);
-			});
+		indices.forEach(function (index) {
+			var el = $('#enabled').children('[data-index="' + index + '"]');
+			var form = el.find('form').serializeArray(),
+				data = {},
+				properties = {};
 
-			available.forEach(function(item) {
-				if (item.route.match(data.route)) {
-					data.properties = item.properties;
+			form.forEach(function (input) {
+				if (input.name.slice(0, 9) === 'property:' && input.value === 'on') {
+					properties[input.name.slice(9)] = true;
+				} else {
+					data[input.name] = translator.escape(input.value);
 				}
 			});
+
+			data.properties = {};
+
+			for (var prop in properties) {
+				if (properties.hasOwnProperty(prop)) {
+					data.properties[prop] = properties[prop];
+				}
+			}
 
 			nav.push(data);
 		});
 
-		socket.emit('admin.navigation.save', nav, function(err) {
+		socket.emit('admin.navigation.save', nav, function (err) {
 			if (err) {
 				app.alertError(err.message);
 			} else {
@@ -74,13 +124,15 @@ define('admin/general/navigation', function() {
 	}
 
 	function remove() {
-		$(this).parents('li').remove();
+		var index = $(this).parents('[data-index]').attr('data-index');
+		$('#active-navigation [data-index="' + index + '"]').remove();
+		$('#enabled [data-index="' + index + '"]').remove();
 		return false;
 	}
 
 	function toggle() {
 		var btn = $(this),
-			disabled = btn.html() === 'Enable';
+			disabled = btn.hasClass('btn-success');
 
 		btn.toggleClass('btn-warning').toggleClass('btn-success').html(!disabled ? 'Enable' : 'Disable');
 		btn.parents('li').find('[name="enabled"]').val(!disabled ? '' : 'on');

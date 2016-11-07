@@ -2,30 +2,32 @@
 
 /* globals define, app, socket */
 
-define('forum/unread', ['forum/recent', 'topicSelect', 'forum/infinitescroll'], function(recent, topicSelect, infinitescroll) {
+define('forum/unread', ['forum/recent', 'topicSelect', 'forum/infinitescroll', 'components'], function (recent, topicSelect, infinitescroll, components) {
 	var Unread = {};
 
-	$(window).on('action:ajaxify.start', function(ev, data) {
+	$(window).on('action:ajaxify.start', function (ev, data) {
 		if (ajaxify.currentPage !== data.url) {
 			recent.removeListeners();
 		}
 	});
 
-	Unread.init = function() {
-		app.enterRoom('recent_posts');
+	Unread.init = function () {
+		app.enterRoom('unread_topics');
 
-		$('#new-topics-alert').on('click', function() {
+		$('#new-topics-alert').on('click', function () {
 			$(this).addClass('hide');
 		});
 
 		recent.watchForNewPosts();
 
-		$('#markSelectedRead').on('click', function() {
+		$(window).trigger('action:topics.loaded', {topics: ajaxify.data.topics});
+
+		$('#markSelectedRead').on('click', function () {
 			var tids = topicSelect.getSelectedTids();
 			if(!tids.length) {
 				return;
 			}
-			socket.emit('topics.markAsRead', tids, function(err) {
+			socket.emit('topics.markAsRead', tids, function (err) {
 				if(err) {
 					return app.alertError(err.message);
 				}
@@ -34,24 +36,25 @@ define('forum/unread', ['forum/recent', 'topicSelect', 'forum/infinitescroll'], 
 			});
 		});
 
-		$('#markAllRead').on('click', function() {
-			socket.emit('topics.markAllRead', function(err) {
+		$('#markAllRead').on('click', function () {
+			socket.emit('topics.markAllRead', function (err) {
 				if(err) {
 					return app.alertError(err.message);
 				}
 
 				app.alertSuccess('[[unread:topics_marked_as_read.success]]');
 
-				$('#topics-container').empty();
+				$('[component="category"]').empty();
+				$('[component="pagination"]').addClass('hidden');
 				$('#category-no-topics').removeClass('hidden');
 				$('.markread').addClass('hidden');
 			});
 		});
 
-		$('.markread').on('click', '.category', function() {
+		$('.markread').on('click', '.category', function () {
 			function getCategoryTids(cid) {
 				var tids = [];
-				$('#topics-container .category-item[data-cid="' + cid + '"]').each(function() {
+				components.get('category/topic', 'cid', cid).each(function () {
 					tids.push($(this).attr('data-tid'));
 				});
 				return tids;
@@ -59,7 +62,7 @@ define('forum/unread', ['forum/recent', 'topicSelect', 'forum/infinitescroll'], 
 			var cid = $(this).attr('data-cid');
 			var tids = getCategoryTids(cid);
 
-			socket.emit('topics.markCategoryTopicsRead', cid, function(err) {
+			socket.emit('topics.markCategoryTopicsRead', cid, function (err) {
 				if(err) {
 					return app.alertError(err.message);
 				}
@@ -68,31 +71,34 @@ define('forum/unread', ['forum/recent', 'topicSelect', 'forum/infinitescroll'], 
 			});
 		});
 
-		socket.emit('categories.get', onCategoriesLoaded);
-
 		topicSelect.init();
 
-		if ($("body").height() <= $(window).height() && $('#topics-container').children().length >= 20) {
+		if ($("body").height() <= $(window).height() && $('[component="category"]').children().length >= 20) {
 			$('#load-more-btn').show();
 		}
 
-		$('#load-more-btn').on('click', function() {
+		$('#load-more-btn').on('click', function () {
 			loadMoreTopics();
 		});
 
-		infinitescroll.init(loadMoreTopics);
+		if (!config.usePagination) {
+			infinitescroll.init(loadMoreTopics);
+		}
 
 		function loadMoreTopics(direction) {
-			if(direction < 0 || !$('#topics-container').length) {
+			if(direction < 0 || !$('[component="category"]').length) {
 				return;
 			}
-
+			var params = utils.params();
+			var cid = params.cid;
 			infinitescroll.loadMore('topics.loadMoreUnreadTopics', {
-				after: $('#topics-container').attr('data-nextstart')
-			}, function(data, done) {
+				after: $('[component="category"]').attr('data-nextstart'),
+				cid: cid,
+				filter: ajaxify.data.selectedFilter.filter
+			}, function (data, done) {
 				if (data.topics && data.topics.length) {
 					recent.onTopicsLoaded('unread', data.topics, true, done);
-					$('#topics-container').attr('data-nextstart', data.nextStart);
+					$('[component="category"]').attr('data-nextstart', data.nextStart);
 				} else {
 					done();
 					$('#load-more-btn').hide();
@@ -106,41 +112,18 @@ define('forum/unread', ['forum/recent', 'topicSelect', 'forum/infinitescroll'], 
 
 		app.alertSuccess('[[unread:topics_marked_as_read.success]]');
 
-		if (!$('#topics-container').children().length) {
+		if (!$('[component="category"]').children().length) {
 			$('#category-no-topics').removeClass('hidden');
 			$('.markread').addClass('hidden');
 		}
 	}
 
 	function removeTids(tids) {
-		for(var i=0; i<tids.length; ++i) {
-			$('#topics-container .category-item[data-tid="' + tids[i] + '"]').remove();
+		for(var i = 0; i < tids.length; ++i) {
+			components.get('category/topic', 'tid', tids[i]).remove();
 		}
 	}
 
-	function onCategoriesLoaded(err, categories) {
-		createCategoryLinks(categories);
-	}
-
-	function createCategoryLinks(categories) {
-		for (var i=0; i<categories.length; ++i) {
-			createCategoryLink(categories[i]);
-		}
-	}
-
-	function createCategoryLink(category) {
-		var link = $('<a role="menuitem" href="#"></a>');
-
-		if (category.icon) {
-			link.append('<i class="fa fa-fw ' + category.icon + '"></i> ' + category.name);
-		} else {
-			link.append(category.name);
-		}
-
-		$('<li role="presentation" class="category" data-cid="' + category.cid + '"></li>')
-			.append(link)
-			.appendTo($('.markread .dropdown-menu'));
-	}
 
 	return Unread;
 });

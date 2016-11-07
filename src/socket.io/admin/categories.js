@@ -1,141 +1,106 @@
 "use strict";
 
-var async = require('async'),
+var async = require('async');
 
-	groups = require('../../groups'),
-	user = require('../../user'),
-	categories = require('../../categories'),
-	privileges = require('../../privileges'),
-	Categories = {};
+var db = require('../../database');
+var groups = require('../../groups');
+var categories = require('../../categories');
+var privileges = require('../../privileges');
+var plugins = require('../../plugins');
+var Categories = {};
 
-Categories.create = function(socket, data, callback) {
-	if(!data) {
+Categories.create = function (socket, data, callback) {
+	if (!data) {
 		return callback(new Error('[[error:invalid-data]]'));
 	}
 
 	categories.create(data, callback);
 };
 
-Categories.purge = function(socket, cid, callback) {
-	categories.purge(cid, callback);
+Categories.getAll = function (socket, data, callback) {
+	async.waterfall([
+		async.apply(db.getSortedSetRange, 'categories:cid', 0, -1),
+		async.apply(categories.getCategoriesData),
+		function (categories, next) {
+			//Hook changes, there is no req, and res
+			plugins.fireHook('filter:admin.categories.get', {categories: categories}, next);
+		},
+		function (result, next) {
+			next(null, categories.getTree(result.categories, 0));
+		}
+	], function (err, categoriesTree) {
+		if (err) {
+			return callback(err);
+		}
+
+		callback(null, categoriesTree);
+	});
 };
 
-Categories.update = function(socket, data, callback) {
-	if(!data) {
+Categories.getNames = function (socket, data, callback) {
+	categories.getAllCategoryFields(['cid', 'name'], callback);
+};
+
+Categories.purge = function (socket, cid, callback) {
+	categories.purge(cid, socket.uid, callback);
+};
+
+Categories.update = function (socket, data, callback) {
+	if (!data) {
 		return callback(new Error('[[error:invalid-data]]'));
 	}
 
 	categories.update(data, callback);
 };
 
-Categories.search = function(socket, data, callback) {
-	if(!data) {
+Categories.setPrivilege = function (socket, data, callback) {
+	if (!data) {
 		return callback(new Error('[[error:invalid-data]]'));
 	}
 
-	var	username = data.username,
-		cid = data.cid;
+	if (Array.isArray(data.privilege)) {
+		async.each(data.privilege, function (privilege, next) {
+			groups[data.set ? 'join' : 'leave']('cid:' + data.cid + ':privileges:' + privilege, data.member, next);
+		}, callback);
+	} else {
+		groups[data.set ? 'join' : 'leave']('cid:' + data.cid + ':privileges:' + data.privilege, data.member, callback);
+	}
+};
 
-	user.search({query: username, uid: socket.uid}, function(err, data) {
+Categories.getPrivilegeSettings = function (socket, cid, callback) {
+	privileges.categories.list(cid, callback);
+};
+
+Categories.copyPrivilegesToChildren = function (socket, cid, callback) {
+	categories.getCategories([cid], socket.uid, function (err, categories) {
 		if (err) {
 			return callback(err);
 		}
+		var category = categories[0];
 
-		async.map(data.users, function(userObj, next) {
-			privileges.categories.userPrivileges(cid, userObj.uid, function(err, privileges) {
-				if(err) {
-					return next(err);
-				}
-
-				userObj.privileges = privileges;
-				next(null, userObj);
-			});
+		async.eachSeries(category.children, function (child, next) {
+			copyPrivilegesToChildrenRecursive(cid, child, next);
 		}, callback);
 	});
 };
 
-Categories.setPrivilege = function(socket, data, callback) {
-	if(!data) {
-		return callback(new Error('[[error:invalid-data]]'));
-	}
-
-	groups[data.set ? 'join' : 'leave']('cid:' + data.cid + ':privileges:' + data.privilege, data.uid, callback);
-};
-
-Categories.getPrivilegeSettings = function(socket, cid, callback) {
-	var privileges = ['find', 'read', 'topics:create', 'topics:reply', 'mods'];
-
-	async.reduce(privileges, [], function(members, privilege, next) {
-		groups.get('cid:' + cid + ':privileges:' + privilege, { expand: true }, function(err, groupObj) {
-			if (err || !groupObj) {
-				return next(null, members);
-			}
-
-			members = members.concat(groupObj.members);
-
-			next(null, members);
-		});
-	}, function(err, members) {
+function copyPrivilegesToChildrenRecursive(parentCid, category, callback) {
+	categories.copyPrivilegesFrom(parentCid, category.cid, function (err) {
 		if (err) {
 			return callback(err);
 		}
-		// Remove duplicates
-		var	present = [],
-			x = members.length,
-			uid;
-		while(x--) {
-			uid = parseInt(members[x].uid, 10);
-			if (present.indexOf(uid) !== -1) {
-				members.splice(x, 1);
-			} else {
-				present.push(uid);
-			}
-		}
-
-		callback(err, members);
-	});
-};
-
-Categories.setGroupPrivilege = function(socket, data, callback) {
-	if(!data) {
-		return callback(new Error('[[error:invalid-data]]'));
-	}
-
-	groups[data.set ? 'join' : 'leave']('cid:' + data.cid + ':privileges:' + data.privilege, data.name, function (err) {
-		if (err) {
-			return callback(err);
-		}
-
-		groups.hide('cid:' + data.cid + ':privileges:' + data.privilege, callback);
-	});
-};
-
-Categories.groupsList = function(socket, cid, callback) {
-	groups.list({
-		expand: false,
-		isAdmin: true,
-		showSystemGroups: true
-	}, function(err, data) {
-		if(err) {
-			return callback(err);
-		}
-
-		// Remove privilege groups
-		data = data.filter(function(groupObj) {
-			return groupObj.name.indexOf(':privileges:') === -1;
-		});
-
-		async.map(data, function(groupObj, next) {
-			privileges.categories.groupPrivileges(cid, groupObj.name, function(err, privileges) {
-				if(err) {
-					return next(err);
-				}
-
-				groupObj.privileges = privileges;
-				next(null, groupObj);
-			});
+		async.eachSeries(category.children, function (child, next) {
+			copyPrivilegesToChildrenRecursive(parentCid, child, next);
 		}, callback);
 	});
+}
+
+Categories.copySettingsFrom = function (socket, data, callback) {
+	categories.copySettingsFrom(data.fromCid, data.toCid, true, callback);
+};
+
+Categories.copyPrivilegesFrom = function (socket, data, callback) {
+	categories.copyPrivilegesFrom(data.fromCid, data.toCid, callback);
 };
 
 module.exports = Categories;

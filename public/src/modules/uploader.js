@@ -1,82 +1,113 @@
 'use strict';
 
-/* globals define */
+/* globals define, templates */
 
-define('uploader', ['csrf'], function(csrf) {
+define('uploader', ['translator'], function (translator) {
 
 	var module = {};
 
-	module.open = function(route, params, fileSize, callback) {
-		var uploadModal = $('#upload-picture-modal');
-		uploadModal.modal('show').removeClass('hide');
-		module.hideAlerts();
-		var uploadForm = $('#uploadForm');
-		uploadForm[0].reset();
-		uploadForm.attr('action', route);
-		uploadForm.find('#params').val(JSON.stringify(params));
+	module.open = function (route, params, fileSize, callback) {
+		console.warn('[uploader] uploader.open() is deprecated, please use uploader.show() instead, and pass parameters as a singe option with callback, e.g. uploader.show({}, callback);');
+		module.show({
+			route: route,
+			params: params,
+			fileSize: fileSize
+		}, callback);
+	};
 
-		if (fileSize) {
-			uploadForm.find('#upload-file-size').html(fileSize);
-			uploadForm.find('#file-size-block').removeClass('hide');
-		} else {
-			uploadForm.find('#file-size-block').addClass('hide');
-		}
+	module.show = function (data, callback) {
+		var fileSize = data.hasOwnProperty('fileSize') && data.fileSize !== undefined ? parseInt(data.fileSize, 10) : false;
+		parseModal({
+			showHelp: data.hasOwnProperty('showHelp') && data.showHelp !== undefined ? data.showHelp : true,
+			fileSize: fileSize,
+			title: data.title || '[[global:upload_file]]',
+			description: data.description || '',
+			button: data.button || '[[global:upload]]',
+			accept: data.accept ? data.accept.replace(/,/g, '&#44; ') : ''
+		}, function (uploadModal) {
+			uploadModal = $(uploadModal);
 
-		$('#pictureUploadSubmitBtn').off('click').on('click', function() {
-			uploadForm.submit();
-		});
-
-		uploadForm.off('submit').submit(function() {
-
-			function showAlert(type, message) {
-				module.hideAlerts();
-				uploadModal.find('#alert-' + type).translateText(message).removeClass('hide');
-			}
-
-			showAlert('status', '[[uploads:uploading-file]]');
-
-			uploadModal.find('#upload-progress-bar').css('width', '0%');
-			uploadModal.find('#upload-progress-box').show().removeClass('hide');
-
-			if (!$('#userPhotoInput').val()) {
-				showAlert('error', '[[uploads:select-file-to-upload]]');
-				return false;
-			}
-
-			$(this).ajaxSubmit({
-				headers: {
-					'x-csrf-token': csrf.get()
-				},
-				error: function(xhr) {
-					xhr = maybeParse(xhr);
-					showAlert('error', xhr.responseJSON ? xhr.responseJSON.error : 'error uploading, code : ' + xhr.status);
-				},
-
-				uploadProgress: function(event, position, total, percent) {
-					uploadModal.find('#upload-progress-bar').css('width', percent + '%');
-				},
-
-				success: function(response) {
-					response = maybeParse(response);
-
-					if (response.error) {
-						showAlert('error', response.error);
-						return;
-					}
-
-					callback(response[0].url);
-
-					showAlert('success', '[[uploads:upload-success]]');
-					setTimeout(function() {
-						module.hideAlerts();
-						uploadModal.modal('hide');
-					}, 750);
-				}
+			uploadModal.modal('show');
+		 	uploadModal.on('hidden.bs.modal', function () {
+				uploadModal.remove();
 			});
 
-			return false;
+			var uploadForm = uploadModal.find('#uploadForm');
+			uploadForm.attr('action', data.route);
+			uploadForm.find('#params').val(JSON.stringify(data.params));
+
+			uploadModal.find('#fileUploadSubmitBtn').on('click', function () {
+				$(this).addClass('disabled');
+				uploadForm.submit();
+			});
+
+			uploadForm.submit(function () {
+				onSubmit(uploadModal, fileSize, callback);
+				return false;
+			});
 		});
 	};
+
+	module.hideAlerts = function (modal) {
+		$(modal).find('#alert-status, #alert-success, #alert-error, #upload-progress-box').addClass('hide');
+	};
+
+	function onSubmit(uploadModal, fileSize, callback) {
+		function showAlert(type, message) {
+			module.hideAlerts(uploadModal);
+			if (type === 'error') {
+				uploadModal.find('#fileUploadSubmitBtn').removeClass('disabled');
+			}
+			uploadModal.find('#alert-' + type).translateText(message).removeClass('hide');
+		}
+
+		showAlert('status', '[[uploads:uploading-file]]');
+
+		uploadModal.find('#upload-progress-bar').css('width', '0%');
+		uploadModal.find('#upload-progress-box').show().removeClass('hide');
+
+		var fileInput = uploadModal.find('#fileInput');
+		if (!fileInput.val()) {
+			return showAlert('error', '[[uploads:select-file-to-upload]]');
+		}
+		if (!hasValidFileSize(fileInput[0], fileSize)) {
+			return showAlert('error', '[[error:file-too-big, ' + fileSize + ']]');
+		}
+
+		uploadModal.find('#uploadForm').ajaxSubmit({
+			headers: {
+				'x-csrf-token': config.csrf_token
+			},
+			error: function (xhr) {
+				xhr = maybeParse(xhr);
+				showAlert('error', xhr.responseJSON ? (xhr.responseJSON.error || xhr.statusText) : 'error uploading, code : ' + xhr.status);
+			},
+			uploadProgress: function (event, position, total, percent) {
+				uploadModal.find('#upload-progress-bar').css('width', percent + '%');
+			},
+			success: function (response) {
+				response = maybeParse(response);
+
+				if (response.error) {
+					return showAlert('error', response.error);
+				}
+
+				callback(response[0].url);
+
+				showAlert('success', '[[uploads:upload-success]]');
+				setTimeout(function () {
+					module.hideAlerts(uploadModal);
+					uploadModal.modal('hide');
+				}, 750);
+			}
+		});
+	}
+
+	function parseModal(tplVals, callback) {
+		templates.parse('partials/modals/upload_file_modal', tplVals, function (html) {
+			translator.translate(html, callback);
+		});
+	}
 
 	function maybeParse(response) {
 		if (typeof response === 'string') {
@@ -89,9 +120,12 @@ define('uploader', ['csrf'], function(csrf) {
 		return response;
 	}
 
-	module.hideAlerts = function() {
-		$('#upload-picture-modal').find('#alert-status, #alert-success, #alert-error, #upload-progress-box').addClass('hide');
-	};
+	function hasValidFileSize(fileElement, maxSize) {
+		if (window.FileReader && maxSize) {
+			return fileElement.files[0].size <= maxSize * 1000;
+		}
+		return true;
+	}
 
 	return module;
 });

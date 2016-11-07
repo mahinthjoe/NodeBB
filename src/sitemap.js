@@ -1,127 +1,174 @@
 'use strict';
 
-var path = require('path'),
-	async = require('async'),
-	sm = require('sitemap'),
-	url = require('url'),
-	nconf = require('nconf'),
-	db = require('./database'),
-	categories = require('./categories'),
-	topics = require('./topics'),
-	privileges = require('./privileges'),
-	meta = require('./meta'),
-	utils = require('../public/src/utils');
+var async = require('async');
+var sm = require('sitemap');
+var nconf = require('nconf');
 
-var sitemap = {};
+var db = require('./database');
+var categories = require('./categories');
+var topics = require('./topics');
+var privileges = require('./privileges');
+var meta = require('./meta');
+var utils = require('../public/src/utils');
 
-sitemap.render = function(callback) {
-	if (sitemap.obj && sitemap.obj.cache.length) {
-		return sitemap.obj.toXML(callback);
+var sitemap = {
+		maps: {
+			topics: []
+		}
+	};
+
+sitemap.render = function (callback) {
+	var numTopics = parseInt(meta.config.sitemapTopics, 10) || 500;
+	var returnData = {
+			url: nconf.get('url'),
+			topics: []
+		};
+	var numPages;
+
+	async.waterfall([
+		async.apply(db.getSortedSetRange, 'topics:recent', 0, -1),
+		function (tids, next) {
+			privileges.topics.filterTids('read', tids, 0, next);
+		}
+	], function (err, tids) {
+		if (err) {
+			numPages = 1;
+		} else {
+			numPages = Math.ceil(tids.length / numTopics);
+		}
+
+		for(var x = 1; x <= numPages; x++) {
+			returnData.topics.push(x);
+		}
+
+		callback(null, returnData);
+	});
+};
+
+sitemap.getPages = function (callback) {
+	if (
+		sitemap.maps.pages &&
+		Date.now() < parseInt(sitemap.maps.pages.cacheSetTimestamp, 10) + parseInt(sitemap.maps.pages.cacheResetPeriod, 10)
+	) {
+		return sitemap.maps.pages.toXML(callback);
 	}
 
-	async.parallel([
-		sitemap.getStaticUrls,
-		sitemap.getDynamicUrls
-	], function(err, urls) {
+	var urls = [{
+			url: '',
+			changefreq: 'weekly',
+			priority: 0.6
+		}, {
+			url: '/recent',
+			changefreq: 'daily',
+			priority: 0.4
+		}, {
+			url: '/users',
+			changefreq: 'daily',
+			priority: 0.4
+		}, {
+			url: '/groups',
+			changefreq: 'daily',
+			priority: 0.4
+		}];
+
+	sitemap.maps.pages = sm.createSitemap({
+		hostname: nconf.get('url'),
+		cacheTime: 1000 * 60 * 60 * 24,	// Cached for 24 hours
+		urls: urls
+	});
+
+	sitemap.maps.pages.toXML(callback);
+};
+
+sitemap.getCategories = function (callback) {
+	if (
+		sitemap.maps.categories &&
+		Date.now() < parseInt(sitemap.maps.categories.cacheSetTimestamp, 10) + parseInt(sitemap.maps.categories.cacheResetPeriod, 10)
+	) {
+		return sitemap.maps.categories.toXML(callback);
+	}
+
+	var categoryUrls = [];
+	categories.getCategoriesByPrivilege('categories:cid', 0, 'find', function (err, categoriesData) {
 		if (err) {
 			return callback(err);
 		}
 
-		urls = urls[0].concat(urls[1]);
-
-		sitemap.obj = sm.createSitemap({
-			hostname: nconf.get('url'),
-			cacheTime: 1000 * 60 * 60,	// Cached for 1 hour
-			urls: urls
+		categoriesData.forEach(function (category) {
+			if (category) {
+				categoryUrls.push({
+					url: '/category/' + category.slug,
+					changefreq: 'weekly',
+					priority: 0.4
+				});
+			}
 		});
 
-		sitemap.obj.toXML(callback);
+		sitemap.maps.categories = sm.createSitemap({
+			hostname: nconf.get('url'),
+			cacheTime: 1000 * 60 * 60 * 24,	// Cached for 24 hours
+			urls: categoryUrls
+		});
+
+		sitemap.maps.categories.toXML(callback);
 	});
 };
 
-sitemap.getStaticUrls = function(callback) {
-	callback(null, [{
-		url: '',
-		changefreq: 'weekly',
-		priority: '0.6'
-	}, {
-		url: '/recent',
-		changefreq: 'daily',
-		priority: '0.4'
-	}, {
-		url: '/users',
-		changefreq: 'daily',
-		priority: '0.4'
-	}]);
-};
+sitemap.getTopicPage = function (page, callback) {
+	if (parseInt(page, 10) <= 0) {
+		return callback();
+	}
 
-sitemap.getDynamicUrls = function(callback) {
-	var returnUrls = [];
+	var numTopics = parseInt(meta.config.sitemapTopics, 10) || 500;
+	var min = (parseInt(page, 10) - 1) * numTopics;
+	var max = min + numTopics;
 
-	async.parallel({
-		categoryUrls: function(next) {
-			var categoryUrls = [];
-			categories.getCategoriesByPrivilege(0, 'find', function(err, categoriesData) {
-				if (err) {
-					return next(err);
-				}
+	if (
+		sitemap.maps.topics[page - 1] &&
+		Date.now() < parseInt(sitemap.maps.topics[page - 1].cacheSetTimestamp, 10) + parseInt(sitemap.maps.topics[page - 1].cacheResetPeriod, 10)
+	) {
+		return sitemap.maps.topics[page - 1].toXML(callback);
+	}
 
-				categoriesData.forEach(function(category) {
-					if (category) {
-						categoryUrls.push({
-							url: '/category/' + category.cid + '/' + encodeURIComponent(utils.slugify(category.name)),
-							changefreq: 'weekly',
-							priority: '0.4'
-						});
-					}
-				});
+	var topicUrls = [];
 
-				next(null, categoryUrls);
-			});
+	async.waterfall([
+		function (next) {
+			db.getSortedSetRevRange('topics:recent', min, max, next);
 		},
-		topicUrls: function(next) {
-			var topicUrls = [];
+		function (tids, next) {
+			privileges.topics.filterTids('read', tids, 0, next);
+		},
+		function (tids, next) {
+			topics.getTopicsFields(tids, ['tid', 'title', 'slug', 'lastposttime'], next);
+		}
+	], function (err, topics) {
+		if (err) {
+			return callback(err);
+		}
 
-			async.waterfall([
-				function(next) {
-					db.getSortedSetRevRange('topics:recent', 0, parseInt(meta.config.sitemapTopics, 10) || -1, next);
-				},
-				function(tids, next) {
-					privileges.topics.filter('read', tids, 0, next);
-				},
-				function(tids, next) {
-					topics.getTopicsFields(tids, ['tid', 'title', 'lastposttime'], next);
-				}
-			], function(err, topics) {
-				if (err) {
-					return next(err);
-				}
-
-				topics.forEach(function(topic) {
-					if (topic) {
-						topicUrls.push({
-							url: '/topic/' + topic.tid + '/' + encodeURIComponent(utils.slugify(topic.title)),
-							lastmodISO: utils.toISOString(topic.lastposttime),
-							changefreq: 'daily',
-							priority: '0.6'
-						});
-					}
+		topics.forEach(function (topic) {
+			if (topic) {
+				topicUrls.push({
+					url: '/topic/' + topic.slug,
+					lastmodISO: utils.toISOString(topic.lastposttime),
+					changefreq: 'daily',
+					priority: 0.6
 				});
+			}
+		});
 
-				next(null, topicUrls);
-			});
-		}
-	}, function(err, data) {
-		if (!err) {
-			returnUrls = data.categoryUrls.concat(data.topicUrls);
-		}
+		sitemap.maps.topics[page - 1] = sm.createSitemap({
+			hostname: nconf.get('url'),
+			cacheTime: 1000 * 60 * 60,	// Cached for 1 hour
+			urls: topicUrls
+		});
 
-		callback(err, returnUrls);
+		sitemap.maps.topics[page - 1].toXML(callback);
 	});
 };
 
-
-sitemap.clearCache = function() {
+sitemap.clearCache = function () {
 	if (sitemap.obj) {
 		sitemap.obj.clearCache();
 	}

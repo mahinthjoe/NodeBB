@@ -5,5 +5,9 @@
     "mark_as_read": "Marcar como Lido",
     "selected": "Selecionado",
     "all": "Todos",
-    "topics_marked_as_read.success": "Tópicos marcados como lidos!"
+    "all_categories": "Todas as categorias",
+    "topics_marked_as_read.success": "Tópicos marcados como lidos!",
+    "all-topics": "Todos os Tópicos",
+    "new-topics": "Novos Tópicos",
+    "watched-topics": "Topicos Acompanhados"
 }

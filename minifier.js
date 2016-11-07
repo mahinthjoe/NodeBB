@@ -1,37 +1,44 @@
 "use strict";
 
-var uglifyjs = require('uglify-js'),
-	less = require('less'),
-	async = require('async'),
-	fs = require('fs'),
-	path = require('path'),
-	crypto = require('crypto'),
+var uglifyjs = require('uglify-js');
+var async = require('async');
+var fs = require('fs');
+var file = require('./src/file');
 
-	Minifier = {
-		js: {}
-	};
+var Minifier = {
+	js: {}
+};
 
 /* Javascript */
 Minifier.js.minify = function (scripts, minify, callback) {
-	scripts = scripts.filter(function(file) {
-		return fs.existsSync(file);
+
+	scripts = scripts.filter(function (file) {
+		return file && file.endsWith('.js');
 	});
 
-	if (minify) {
-		minifyScripts(scripts, function() {
-			callback.apply(this, arguments);
+	async.filter(scripts, function (script, next) {
+		file.exists(script, function (exists) {
+			if (!exists) {
+				console.warn('[minifier] file not found, ' + script);
+			}
+			next(exists);
 		});
-	} else {
-		concatenateScripts(scripts, callback);
-	}
+	}, function (scripts) {
+		if (minify) {
+			minifyScripts(scripts, callback);
+		} else {
+			concatenateScripts(scripts, callback);
+		}
+	});
 };
 
-process.on('message', function(payload) {
+process.on('message', function (payload) {
 	switch(payload.action) {
 	case 'js':
-		Minifier.js.minify(payload.scripts, payload.minify, function(minified) {
+		Minifier.js.minify(payload.scripts, payload.minify, function (minified/*, sourceMap*/) {
 			process.send({
 				type: 'end',
+				// sourceMap: sourceMap,
 				minified: minified
 			});
 		});
@@ -40,37 +47,31 @@ process.on('message', function(payload) {
 });
 
 function minifyScripts(scripts, callback) {
+	// The portions of code involving the source map are commented out as they're broken in UglifyJS2
+	// Follow along here: https://github.com/mishoo/UglifyJS2/issues/700
 	try {
 		var minified = uglifyjs.minify(scripts, {
+				// outSourceMap: "nodebb.min.js.map",
 				compress: false
-			}),
-			hasher = crypto.createHash('md5'),
-			hash;
+			});
 
-		// Calculate js hash
-		hasher.update(minified.code, 'utf-8');
-		hash = hasher.digest('hex');
-		process.send({
-			type: 'hash',
-			payload: hash.slice(0, 8)
-		});
-
-		callback(minified.code);
+		callback(minified.code/*, minified.map*/);
 	} catch(err) {
 		process.send({
 			type: 'error',
-			payload: err.message
+			message: err.message
 		});
 	}
 }
 
 function concatenateScripts(scripts, callback) {
-	async.map(scripts, fs.readFile, function(err, scripts) {
+	async.map(scripts, fs.readFile, function (err, scripts) {
 		if (err) {
 			process.send({
 				type: 'error',
-				payload: err
+				message: err.message
 			});
+			return;
 		}
 
 		scripts = scripts.join(require('os').EOL + ';');

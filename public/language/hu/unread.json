@@ -5,5 +5,9 @@
     "mark_as_read": "Olvasottnak jelölés",
     "selected": "Kiválasztva",
     "all": "Összes",
-    "topics_marked_as_read.success": "Témakör olvasottnak jelölve!"
+    "all_categories": "Minden kategória",
+    "topics_marked_as_read.success": "Témakör olvasottnak jelölve!",
+    "all-topics": "Minden témakör",
+    "new-topics": "Új témakör",
+    "watched-topics": "Figyelt témakör"
 }

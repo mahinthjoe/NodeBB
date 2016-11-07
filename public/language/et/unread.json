@@ -5,5 +5,9 @@
     "mark_as_read": "Märgi loetuks",
     "selected": "Valitud",
     "all": "Kõik",
-    "topics_marked_as_read.success": "Teemad märgitud loetuks!"
+    "all_categories": "Kõik kategooriad",
+    "topics_marked_as_read.success": "Teemad märgitud loetuks!",
+    "all-topics": "Kõik teemad",
+    "new-topics": "Uued teemad",
+    "watched-topics": "Vaadatud teemad"
 }

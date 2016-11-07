@@ -1,36 +1,24 @@
 "use strict";
 
-var async = require('async'),
-	
-	posts = require('../posts'),
-	privileges = require('../privileges'),
-	helpers = require('./helpers'),
-	postsController = {};
+var posts = require('../posts');
+var helpers = require('./helpers');
 
-postsController.getPost = function(req, res, next) {
-	var uid = req.user ? parseInt(req.user.uid) : 0;
-	async.parallel({
-		canRead: function(next) {
-			privileges.posts.can('read', req.params.pid, uid, next);
-		},
-		postData: function(next) {
-			posts.getPostData(req.params.pid, next);
-		}
-	}, function(err, results) {
-		if (err) {
-			return next(err);
-		}
-		if (!results.postData) {
-			return helpers.notFound(req, res);
-		}
-		if (!results.canRead) {
-			return helpers.notAllowed(req, res);
+var postsController = {};
+
+postsController.redirectToPost = function (req, res, callback) {
+	var pid = parseInt(req.params.pid, 10);
+	if (!pid) {
+		return callback();
+	}
+
+	posts.generatePostPath(pid, req.uid, function (err, path) {
+		if (err || !path) {
+			return callback(err);
 		}
 
-		res.json(results.postData);
+		helpers.redirect(res, path);
 	});
 };
-
 
 
 module.exports = postsController;
